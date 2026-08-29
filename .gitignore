@@ -1,0 +1,15 @@
+# for IDE
+.vscode
+.cursor
+
+# training logs
+work_dirs/
+wandb/
+outputs/
+
+
+# training data
+data/
+
+# python cache
+**/__pycache__/
