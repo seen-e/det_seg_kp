@@ -290,6 +290,7 @@ def save_gt_pred_strip(
     epoch: int,
     step: int,
 ) -> str:
+    """Write strip PNG to ``{output_dir}/vis/epoch####_step######.png``."""
     vis_dir = os.path.join(output_dir, "vis")
     os.makedirs(vis_dir, exist_ok=True)
     path = os.path.join(vis_dir, f"epoch{epoch:04d}_step{step:06d}.png")

@@ -54,10 +54,7 @@ def resolve_pixel_decoder_type(type_name: str) -> str:
 
 
 def build_pixel_decoder(cfg: PixelDecoderSpec) -> nn.Module:
-    """Build a pixel decoder from config (only argument).
-
-    Currently only ``type="fpn"`` (:class:`FPNPixelDecoder`) is supported.
-    """
+    """Build from config. Currently only ``type="fpn"`` is supported."""
     pixel_cfg = parse_pixel_decoder_cfg(cfg)
     key = resolve_pixel_decoder_type(pixel_cfg.type)
     cls = _PIXEL_DECODER_TYPES[key]

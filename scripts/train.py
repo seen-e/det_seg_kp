@@ -141,6 +141,7 @@ def train_one_epoch(
     precision: Optional[PrecisionSpec] = None,
     scaler: Optional[GradScaler] = None,
 ) -> tuple[Dict[str, float], int]:
+    """One training epoch with AMP, optional EMA, and periodic GT/Pred dumps."""
     if precision is None:
         precision = resolve_precision("fp32", device)
     if scaler is None:
@@ -211,6 +212,7 @@ def evaluate(
     world_size: int,
     precision: Optional[PrecisionSpec] = None,
 ) -> Dict[str, float]:
+    """Validation-loop loss average (no grad); caller may swap in EMA weights."""
     if precision is None:
         precision = resolve_precision("fp32", device)
     model.eval()

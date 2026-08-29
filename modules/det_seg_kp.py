@@ -1,11 +1,11 @@
 """
 Det + Seg + Keypoint model.
 
-Architecture (SAM3 / MaskFormer inspired):
+Architecture (MaskFormer-style pixel features + Deformable-DETR queries):
   1. Vision tower extracts multi-scale image features
   2. FPN pixel decoder fuses them into a shared stride-4 pixel feature map
-  3. Object query decoder (Deformable DETR) samples multi-scale FPN via MSDeformAttn
-  4. Per-query heads predict: class, bbox, instance mask (dot-product), keypoints
+  3. Object query decoder samples multi-scale FPN via MSDeformAttn and predicts boxes
+  4. Per-query heads predict class, instance mask, and keypoints (dot-product)
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from .pixel_decoder import build_pixel_decoder
 
 
 class DetSegKPHead(nn.Module):
-    """Per-query heads for class, mask, and keypoints. Boxes come from the decoder."""
+    """Per-query class / mask / keypoint heads. Boxes come from the decoder."""
 
     def __init__(
         self,
@@ -33,7 +33,7 @@ class DetSegKPHead(nn.Module):
     ):
         super().__init__()
         self.class_head = nn.Linear(hidden_dim, num_classes + 1)  # +1 for no-object
-        # Same 2-layer ReLU MLP pattern as decoder bbox_embed (timm.layers.Mlp).
+        # Same 2-layer ReLU MLP as decoder bbox_embed (timm.layers.Mlp).
         self.mask_embed = Mlp(hidden_dim, hidden_dim, pixel_dim, act_layer=nn.ReLU)
         self.kp_embed = Mlp(hidden_dim, hidden_dim, pixel_dim, act_layer=nn.ReLU)
         self.pixel_dim = pixel_dim
@@ -44,8 +44,12 @@ class DetSegKPHead(nn.Module):
         pixel_features: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
         """
-        obj_queries: (B, Q, C)
-        pixel_features: (B, pixel_dim, H, W) from pixel decoder
+        Args:
+          obj_queries: (B, Q, C)
+          pixel_features: (B, pixel_dim, H, W)
+
+        Returns:
+          pred_logits (B, Q, C+1), pred_masks / pred_kps (B, Q, H, W) as logits.
         """
         mask_embed = self.mask_embed(obj_queries)
         kp_embed = self.kp_embed(obj_queries)
@@ -63,7 +67,7 @@ class DetSegKPModel(nn.Module):
     Pipeline:
       image -> vision_tower -> FPN pixel_decoder -> pixel_features (stride 4)
                             -> multi-scale memory (stride >= 8) -> Deformable-DETR decoder
-      obj_queries + pixel_features -> det / mask / kp heads
+      obj_queries + pixel_features -> class / mask / kp heads; boxes from decoder
     """
 
     def __init__(self, cfg: ModelConfig):
@@ -79,6 +83,10 @@ class DetSegKPModel(nn.Module):
         )
 
     def forward(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Returns dict with pred_logits / pred_boxes / pred_masks / pred_kps,
+        aux_outputs (cls+box per intermediate layer), pixel_features, obj_queries.
+        """
         features = as_feature_maps(self.vision_tower(images))
         out_h = images.shape[-2] // self.pixel_decoder.out_stride
         out_w = images.shape[-1] // self.pixel_decoder.out_stride
@@ -103,7 +111,7 @@ class DetSegKPModel(nn.Module):
         score_threshold: float = 0.5,
         mask_threshold: float = 0.5,
     ) -> List[Dict[str, torch.Tensor]]:
-        """Post-process outputs into per-image predictions."""
+        """Run forward and :func:`postprocess` under eval mode."""
         self.eval()
         outputs = self.forward(images)
         return postprocess(outputs, score_threshold, mask_threshold)
@@ -114,7 +122,11 @@ def postprocess(
     score_threshold: float = 0.5,
     mask_threshold: float = 0.5,
 ) -> List[Dict[str, torch.Tensor]]:
-    """Convert raw model outputs to final predictions per image."""
+    """Per-image predictions after score / mask thresholds.
+
+    Each item has scores, labels (excl. no-object), boxes (cxcywh), binary masks,
+    and sigmoid KP heatmaps (not decoded (x, y, v) corners).
+    """
     pred_logits = outputs["pred_logits"]  # (B, Q, C+1)
     pred_boxes = outputs["pred_boxes"]
     pred_masks = outputs["pred_masks"]

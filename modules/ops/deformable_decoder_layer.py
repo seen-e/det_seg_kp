@@ -11,6 +11,11 @@ from .ms_deform_atten_2D import MSDeformAttn
 
 
 class DeformableDecoderLayer(nn.Module):
+    """One decoder layer: self-attn, MSDeformAttn cross-attn, FFN.
+
+    Each sublayer uses residual + Dropout + LayerNorm (post-norm, DETR-style).
+    """
+
     def __init__(
         self,
         d_model: int,
@@ -25,6 +30,7 @@ class DeformableDecoderLayer(nn.Module):
             d_model, n_heads, dropout=dropout, batch_first=True
         )
         self.cross_attn = MSDeformAttn(d_model, n_levels, n_heads, n_points)
+        # drop after act matches official FFN; residual dropout covers post-fc2.
         self.ffn = Mlp(
             d_model, dim_feedforward, d_model, act_layer=nn.ReLU, drop=(dropout, 0.0)
         )

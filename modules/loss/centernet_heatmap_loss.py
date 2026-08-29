@@ -1,4 +1,7 @@
-"""CornerNet / CenterNet heatmap focal loss (sparse Gaussian peaks)."""
+"""CornerNet / CenterNet heatmap focal loss (optional alternate).
+
+Not used by current :class:`DetSegKPLoss` (KP uses :func:`sigmoid_focal_loss`).
+"""
 from __future__ import annotations
 
 import torch
@@ -12,17 +15,16 @@ def centernet_heatmap_loss(
     peak_thresh: float = 0.8,
     eps: float = 1e-4,
 ) -> torch.Tensor:
-    """Distinct from RetinaNet ``sigmoid_focal_loss``.
+    """CornerNet/CenterNet heatmap focal (distinct from RetinaNet focal).
 
     - positives: near-peak pixels (Y >= ``peak_thresh``)
     - non-peaks: ``-(1-Y)^β * p^α * log(1-p)``
-    - normalize by #positive pixels, not full-map mean
+    - normalize by #positive pixels
 
-    Always computed in float32 (bf16 autocast makes ``log``/``pow`` overflow to Inf).
-
-    ``inputs``: logits; ``targets``: Gaussian heatmap in [0, 1].
+    Always float32 (bf16 ``log``/``pow`` can overflow). ``inputs`` are logits;
+    ``targets`` are Gaussian heatmaps in [0, 1].
     """
-    # Autocast-safe: bf16 log/pow on heatmap easily overflows to Inf.
+    # bf16 log/pow on heatmap can overflow to Inf.
     pred = inputs.float().clamp(-10.0, 10.0).sigmoid().clamp(min=eps, max=1.0 - eps)
     targets = targets.float()
 

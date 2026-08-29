@@ -32,6 +32,7 @@ def setup_distributed(backend: str = "nccl") -> tuple[int, int, int, bool]:
 
 
 def cleanup_distributed() -> None:
+    """Destroy the process group if initialized."""
     if dist.is_initialized():
         dist.destroy_process_group()
 
@@ -41,6 +42,7 @@ def is_main_process(rank: int) -> bool:
 
 
 def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+    """Strip ``DistributedDataParallel`` wrapper when present."""
     return model.module if isinstance(model, DDP) else model
 
 
@@ -62,6 +64,7 @@ def log_info(rank: int, msg: str) -> None:
 
 
 def init_wandb(args: argparse.Namespace, cfg: Config, world_size: int) -> Optional[Any]:
+    """Initialize Weights & Biases on the main process when ``args.wandb`` is set."""
     if not args.wandb:
         return None
     import wandb

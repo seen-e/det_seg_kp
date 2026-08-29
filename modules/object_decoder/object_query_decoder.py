@@ -34,8 +34,10 @@ class DeformDETRObjectDecoder(nn.Module):
     Query embedding is 2C and split into:
       - query_pos: learned slot identity, added every layer (not updated)
       - tgt: learned query content, refined by the decoder
-    Each layer predicts a box residual, updates the sampling reference
-    (detached for the next layer), and is supervised by an auxiliary loss.
+
+    Reference starts as 2D centers (cx, cy). Each layer predicts a box residual;
+    detached pred boxes (cxcywh) become the next-layer reference and are
+    supervised by an auxiliary loss.
     """
 
     def __init__(self, cfg: ObjectQueryDecoderConfig):
@@ -57,18 +59,16 @@ class DeformDETRObjectDecoder(nn.Module):
 
         self.query_embed = nn.Embedding(cfg.num_queries, hidden_dim * 2)
         self.reference_points = nn.Linear(hidden_dim, 2)
+        layer = DeformableDecoderLayer(
+            d_model=hidden_dim,
+            n_heads=cfg.num_heads,
+            n_levels=self.n_levels,
+            n_points=cfg.n_points,
+            dim_feedforward=hidden_dim * 4,
+            dropout=cfg.dropout,
+        )
         self.layers = nn.ModuleList(
-            [
-                DeformableDecoderLayer(
-                    d_model=hidden_dim,
-                    n_heads=cfg.num_heads,
-                    n_levels=self.n_levels,
-                    n_points=cfg.n_points,
-                    dim_feedforward=hidden_dim * 4,
-                    dropout=cfg.dropout,
-                )
-                for _ in range(cfg.num_layers)
-            ]
+            copy.deepcopy(layer) for _ in range(cfg.num_layers)
         )
         bbox_embed = Mlp(hidden_dim, hidden_dim, 4, act_layer=nn.ReLU)
         constant_(bbox_embed.fc2.weight, 0.0)

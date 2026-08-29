@@ -1,4 +1,4 @@
-"""FPN pixel decoder (MaskFormer / Mask2Former style)."""
+"""FPN pixel decoder (MaskFormer BasePixelDecoder style)."""
 from __future__ import annotations
 
 from typing import Dict, Mapping, Optional, Tuple
@@ -19,15 +19,11 @@ def _gn_groups(num_channels: int, max_groups: int = 32) -> int:
 
 
 class FPNPixelDecoder(nn.Module):
-    """FPN pixel decoder (MaskFormer BasePixelDecoder / Mask2Former style).
+    """FPN pixel decoder (MaskFormer BasePixelDecoder; not Mask2Former MSDeformAttn).
 
     Consumes a :class:`FeatureMaps` dict (e.g. ``{'4x', '8x', '16x'}``).
     Top-down laterals fuse them; the finest map is optionally upsampled to
     ``out_stride`` (default 4) and projected to ``pixel_dim`` for mask / kp heads.
-
-    Returns:
-      pixel_features: (B, pixel_dim, H/out_stride, W/out_stride)
-      fpn: FeatureMaps of fused maps at each backbone scale
     """
 
     def __init__(self, cfg: PixelDecoderConfig):
@@ -80,6 +76,11 @@ class FPNPixelDecoder(nn.Module):
         features: Mapping[str, torch.Tensor],
         out_size: Optional[Tuple[int, int]] = None,
     ) -> Tuple[torch.Tensor, FeatureMaps]:
+        """
+        Returns:
+          pixel_features: (B, pixel_dim, H/out_stride, W/out_stride)
+          fpn: FeatureMaps of fused maps at each backbone scale
+        """
         maps = as_feature_maps(features)
         missing = [key for key in self.scale_keys if key not in maps]
         if missing:

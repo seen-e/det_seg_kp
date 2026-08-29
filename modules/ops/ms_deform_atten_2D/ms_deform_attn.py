@@ -180,7 +180,7 @@ def ms_deform_attn_core(
     level_start_index: Optional[torch.Tensor] = None,
     im2col_step: int = 64,
 ) -> torch.Tensor:
-    """Dispatch: CUDA when extension + GPU, else Pytorch grid_sample."""
+    """CUDA extension when available on GPU; else PyTorch ``grid_sample`` fallback."""
     use_cuda = _MSDA_AVAILABLE and value.is_cuda and level_start_index is not None
     if use_cuda:
         return ms_deform_attn_core_CUDA(
@@ -197,6 +197,12 @@ def ms_deform_attn_core(
 
 
 class MSDeformAttn(nn.Module):
+    """Multi-scale deformable attention (Deformable-DETR).
+
+    Predicts sampling offsets and attention weights from the query; supports
+    2D (cx, cy) or 4D (cxcywh) reference points.
+    """
+
     def __init__(
         self,
         d_model: int = 256,

@@ -21,7 +21,7 @@
 
 - Det：CE + L1 + GIoU；中间 decoder 层有 aux（仅 cls / box）
 - Seg：sigmoid focal + Dice（仅最后一层）
-- KPS：CenterNet 式 heatmap focal（仅最后一层；bf16 下在 float32 中算）
+- KPS：RetinaNet 式 sigmoid focal（`pos_thresh` 归一化；仅最后一层）
 
 ## 2. 架构与代码结构
 
@@ -153,5 +153,6 @@ torchrun --standalone --nproc_per_node=2 scripts/train.py --batch-size 4
 ## 7. 备注
 
 - Mask / KP 只在最后一层 query 上监督；aux 仅 cls / box。
-- KP 正样本：heatmap ≥ `peak_thresh`（默认 0.8）的近峰像素；与 mask 的 RetinaNet focal 分开实现。
+- KP 正样本：heatmap ≥ `pos_thresh`（默认 0.01）的像素参与归一化；与 mask 共用 `sigmoid_focal_loss`（mask 为全图 mean）。
+- `centernet_heatmap_loss` 为可选实现，当前训练未接入。
 - Decoder / head 结构变更后，旧 checkpoint 可能无法直接加载。

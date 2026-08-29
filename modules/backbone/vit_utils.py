@@ -22,7 +22,11 @@ def tokens_to_feature_map(
     *,
     has_cls_token: bool = True,
 ) -> torch.Tensor:
-    """Convert ViT token sequence (B, N, C) to spatial feature map (B, C, H, W)."""
+    """Reshape (B, N, C) tokens to (B, C, H, W).
+
+    If ``has_cls_token``, drop ``tokens[:, 0]``. Pass ``False`` for patch-only
+    tensors (e.g. DINOv2 ``x_norm_patchtokens``).
+    """
     if has_cls_token:
         tokens = tokens[:, 1:]
     _, n, _ = tokens.shape
@@ -33,6 +37,7 @@ def tokens_to_feature_map(
 
 
 def extract_vit_tokens(features: torch.Tensor | dict, token_key: str) -> torch.Tensor:
+    """Pull token tensor from a timm feature dict, with patchtoken / ``x`` fallbacks."""
     if not isinstance(features, dict):
         return features
     if token_key in features:

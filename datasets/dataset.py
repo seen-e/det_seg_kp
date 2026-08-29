@@ -315,6 +315,7 @@ class DetSegKPDataset(Dataset):
 
 
 def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Stack images; keep per-sample targets (variable N) under ``targets``."""
     images = torch.stack([b["image"] for b in batch])
     return {
         "images": images,

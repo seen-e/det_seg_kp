@@ -19,6 +19,7 @@ def save_checkpoint(
     cfg: Config,
     ema: Optional[ModelEmaV2] = None,
 ) -> None:
+    """Save epoch, unwrapped model, optimizer, cfg, and optional EMA weights."""
     payload = {
         "epoch": epoch,
         "model": unwrap_model(model).state_dict(),

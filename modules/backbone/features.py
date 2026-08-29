@@ -20,6 +20,7 @@ def parse_scale(key: str) -> int:
 
 
 def channels_by_scale(stride_to_channels: Mapping[int, int]) -> Dict[str, int]:
+    """Map ``{stride: C}`` to ``{'Nx': C}`` feature-pyramid keys."""
     return {scale_key(stride): int(ch) for stride, ch in stride_to_channels.items()}
 
 

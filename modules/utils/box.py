@@ -5,6 +5,7 @@ import torch
 
 
 def box_cxcywh_to_xyxy(boxes: torch.Tensor) -> torch.Tensor:
+    """Convert (cx, cy, w, h) to (x0, y0, x1, y1); sanitizes NaN/Inf."""
     boxes = torch.nan_to_num(boxes, nan=0.5, posinf=1.0, neginf=0.0)
     cx, cy, w, h = boxes.unbind(-1)
     w = w.clamp(min=0.0)
@@ -13,6 +14,7 @@ def box_cxcywh_to_xyxy(boxes: torch.Tensor) -> torch.Tensor:
 
 
 def box_xyxy_to_cxcywh(boxes: torch.Tensor) -> torch.Tensor:
+    """Convert (x0, y0, x1, y1) to (cx, cy, w, h)."""
     x0, y0, x1, y1 = boxes.unbind(-1)
     return torch.stack([(x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0], dim=-1)
 

@@ -60,6 +60,8 @@ class PixelDecoderConfig:
 
 @dataclass
 class ModelConfig:
+    """Top-level model composition: vision tower, pixel decoder, object decoder."""
+
     num_classes: int = 1
     vision_tower: VisionTowerConfig = field(
         default_factory=lambda: VisionTowerConfig(
@@ -118,6 +120,12 @@ class DataConfig:
 
 @dataclass
 class TrainConfig:
+    """Optimizer, schedule, AMP, EMA, logging, and loss weights.
+
+    ``loss_*`` are both criterion weights and Hungarian matcher cost coefficients
+    for cls / bbox / giou.
+    """
+
     batch_size: int = 4
     epochs: int = 50000
     lr: float = 1e-4
@@ -136,17 +144,14 @@ class TrainConfig:
     save_interval: int = 5000
     seed: int = 42
 
-    # EMA
     use_ema: bool = True
     ema_decay: float = 0.9999
 
-    # wandb
     use_wandb: bool = False
     wandb_project: str = "det_seg_kp"
     wandb_run_name: str = ""
     wandb_entity: str = ""
 
-    # loss weights
     loss_cls: float = 2.0
     loss_bbox: float = 5.0
     loss_giou: float = 2.0
@@ -157,6 +162,8 @@ class TrainConfig:
 
 @dataclass
 class Config:
+    """Root config: model + data + train."""
+
     model: ModelConfig = field(default_factory=ModelConfig)
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)

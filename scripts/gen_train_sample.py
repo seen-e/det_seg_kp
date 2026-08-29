@@ -1655,7 +1655,7 @@ def make_random_boxes(n: int, seed: int = 0) -> np.ndarray:
 
 
 def make_demo_boxes(seed: int = 0) -> np.ndarray:
-    """Fixed small set of boxes for quick visualization."""
+    """Fixed demo boxes for quick visualization (``seed`` ignored)."""
     del seed
     specs = (
         dict(center=(-1.2, 8.0, 1.2), size=(1.2, 0.9, 0.8), euler=(0, 0, 15)),

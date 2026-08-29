@@ -18,7 +18,7 @@ from ..utils.box import box_cxcywh_to_xyxy, generalized_box_iou
 
 
 class HungarianMatcher(nn.Module):
-    """Bipartite matching between queries and ground-truth objects."""
+    """DETR-style Hungarian matching with cls + L1 + GIoU costs (no mask/kp)."""
 
     def __init__(
         self,
@@ -74,7 +74,11 @@ class HungarianMatcher(nn.Module):
 
 
 class DetSegKPLoss(nn.Module):
-    """Combined loss for detection, segmentation, and keypoints."""
+    """Hungarian-matched multitask loss.
+
+    Final layer: cls, L1, GIoU, mask focal, Dice, KP focal.
+    Intermediate (aux) layers: cls / box only.
+    """
 
     def __init__(
         self,
@@ -266,6 +270,7 @@ class DetSegKPLoss(nn.Module):
 
 
 def build_criterion(cfg) -> DetSegKPLoss:
+    """Build matcher + DetSegKPLoss; duplicate cls/box weights for each aux layer."""
     matcher = HungarianMatcher(
         cost_class=cfg.train.loss_cls,
         cost_bbox=cfg.train.loss_bbox,

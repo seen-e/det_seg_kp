@@ -55,11 +55,7 @@ def resolve_object_query_decoder_type(type_name: str) -> str:
 
 
 def build_object_query_decoder(cfg: ObjectQueryDecoderSpec) -> nn.Module:
-    """Build an object query decoder from config (only argument).
-
-    Currently only ``type="deform_detr"`` (:class:`DeformDETRObjectDecoder`) is
-    supported.
-    """
+    """Build from config. Currently only ``type="deform_detr"`` is supported."""
     decoder_cfg = parse_object_query_decoder_cfg(cfg)
     key = resolve_object_query_decoder_type(decoder_cfg.type)
     cls = _OBJECT_DECODER_TYPES[key]

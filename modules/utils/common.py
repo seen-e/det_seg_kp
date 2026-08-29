@@ -1,4 +1,4 @@
-"""Shared utility functions for training and datasets (non-loss)."""
+"""Shared helpers: seeding, box residual decode, Gaussian heatmaps."""
 import random
 from typing import Tuple
 
@@ -7,6 +7,7 @@ import torch
 
 
 def set_seed(seed: int) -> None:
+    """Seed Python, NumPy, and torch (including all CUDA devices)."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

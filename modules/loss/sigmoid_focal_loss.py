@@ -13,10 +13,11 @@ def sigmoid_focal_loss(
     gamma: float = 2.0,
     pos_thresh: Optional[float] = None,
 ) -> torch.Tensor:
-    """RetinaNet focal loss; not CenterNet heatmap loss.
+    """RetinaNet-style sigmoid focal loss.
 
-    ``pos_thresh is None``: mean over all pixels (masks).
-    Otherwise: sum / N_pos, N_pos = #{Y >= pos_thresh} (sparse heatmaps).
+    Used for masks (``pos_thresh=None``, mean over pixels) and KP heatmaps
+    (``pos_thresh`` set → sum / #{Y >= thresh}). Distinct from
+    :func:`centernet_heatmap_loss`.
     """
     prob = inputs.sigmoid()
     ce = torch.nn.functional.binary_cross_entropy_with_logits(
