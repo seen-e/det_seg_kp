@@ -7,8 +7,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from modules.backbone import FeatureMaps, as_feature_maps, parse_scale
-from modules.config import PixelDecoderConfig
+from ..backbone import FeatureMaps, as_feature_maps, parse_scale
+from ..config import PixelDecoderConfig
 
 
 def _gn_groups(num_channels: int, max_groups: int = 32) -> int:

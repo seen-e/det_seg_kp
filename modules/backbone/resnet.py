@@ -18,7 +18,7 @@ from torchvision.models import (
     resnet152,
 )
 
-from modules.backbone.features import FeatureMaps, parse_scale, resolve_feature_pyramids
+from .features import FeatureMaps, parse_scale, resolve_feature_pyramids
 
 # (builder, weights enum, channels of layer1 / layer2 / layer3 at 4x / 8x / 16x)
 ResNetSpec = Tuple[Type[nn.Module], object, Tuple[int, int, int]]

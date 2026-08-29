@@ -10,10 +10,10 @@ from einops import rearrange
 from timm.layers import Mlp
 from torch.nn.init import constant_, xavier_uniform_
 
-from modules.backbone import as_feature_maps, parse_scale
-from modules.config import ObjectQueryDecoderConfig
-from modules.ops import DeformableDecoderLayer
-from modules.utils.common import decode_boxes
+from ..backbone import as_feature_maps, parse_scale
+from ..config import ObjectQueryDecoderConfig
+from ..ops import DeformableDecoderLayer
+from ..utils.common import decode_boxes
 
 
 def _select_memory_keys(scale_keys: List[str], memory_min_stride: int) -> Tuple[str, ...]:

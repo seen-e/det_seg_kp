@@ -1,4 +1,4 @@
-from datasets.dataset import (
+from .dataset import (
     DetSegKPDataset,
     build_dataloader,
     build_train_dataloader,
@@ -7,7 +7,7 @@ from datasets.dataset import (
     kps_to_heatmap,
     kps_to_heatmaps,
 )
-from datasets.transforms import DetSegKPTransform
+from .transforms import DetSegKPTransform
 
 from scripts.gen_train_sample import (
     ensure_kps_xyv,

@@ -27,7 +27,7 @@ from einops import rearrange
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-from datasets.transforms import DetSegKPTransform
+from .transforms import DetSegKPTransform
 from modules.config import Config, DataConfig
 from scripts.gen_train_sample import (
     TRAIN_LABEL_SUFFIX,

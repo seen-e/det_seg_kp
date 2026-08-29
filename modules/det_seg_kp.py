@@ -16,10 +16,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from timm.layers import Mlp
 
-from modules.config import ModelConfig
-from modules.backbone import as_feature_maps, build_vision_tower
-from modules.object_decoder import build_object_query_decoder
-from modules.pixel_decoder import build_pixel_decoder
+from .config import ModelConfig
+from .backbone import as_feature_maps, build_vision_tower
+from .object_decoder import build_object_query_decoder
+from .pixel_decoder import build_pixel_decoder
 
 
 class DetSegKPHead(nn.Module):

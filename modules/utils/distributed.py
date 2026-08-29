@@ -10,7 +10,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from modules.config import Config
+from ..config import Config
 
 
 def setup_distributed(backend: str = "nccl") -> tuple[int, int, int, bool]:

@@ -12,9 +12,9 @@ import torch.nn.functional as F
 from einops import rearrange
 from scipy.optimize import linear_sum_assignment
 
-from modules.loss.dice_loss import dice_loss
-from modules.loss.sigmoid_focal_loss import sigmoid_focal_loss
-from modules.utils.box import box_cxcywh_to_xyxy, generalized_box_iou
+from .dice_loss import dice_loss
+from .sigmoid_focal_loss import sigmoid_focal_loss
+from ..utils.box import box_cxcywh_to_xyxy, generalized_box_iou
 
 
 class HungarianMatcher(nn.Module):

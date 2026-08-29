@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Union
 
-from modules.config import PixelDecoderConfig
-from modules.pixel_decoder.pixel_decoder import PixelDecoder
+from ..config import PixelDecoderConfig
+from .pixel_decoder import PixelDecoder
 
 PixelDecoderSpec = Union[PixelDecoderConfig, Mapping[str, Any]]
 

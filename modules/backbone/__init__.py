@@ -5,16 +5,16 @@ from typing import Any, Mapping, Union
 
 import torch.nn as nn
 
-from modules.backbone.clip import (
+from .clip import (
     CLIP_CONVNeXT_SPECS,
     CLIP_VIT_SPECS,
     CLIPConvNeXtVisionTower,
     CLIPViTVisionTower,
 )
-from modules.backbone.dinov2 import DINOV2_SPECS, DINOV2VisionTower
-from modules.backbone.features import FeatureMaps, as_feature_maps, parse_scale, scale_key
-from modules.backbone.resnet import RESNET_SPECS, ResNetVisionTower
-from modules.config import VisionTowerConfig
+from .dinov2 import DINOV2_SPECS, DINOV2VisionTower
+from .features import FeatureMaps, as_feature_maps, parse_scale, scale_key
+from .resnet import RESNET_SPECS, ResNetVisionTower
+from ..config import VisionTowerConfig
 
 _ALL_SPECS = {**RESNET_SPECS, **DINOV2_SPECS, **CLIP_VIT_SPECS, **CLIP_CONVNeXT_SPECS}
 

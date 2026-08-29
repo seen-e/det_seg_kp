@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from timm.layers import Mlp
 
-from modules.ops.ms_deform_atten_2D import MSDeformAttn
+from .ms_deform_atten_2D import MSDeformAttn
 
 
 class DeformableDecoderLayer(nn.Module):

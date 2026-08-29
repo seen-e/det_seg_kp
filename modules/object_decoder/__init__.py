@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Union
 
-from modules.config import ObjectQueryDecoderConfig
-from modules.object_decoder.object_query_decoder import ObjectQueryDecoder
+from ..config import ObjectQueryDecoderConfig
+from .object_query_decoder import ObjectQueryDecoder
 
 ObjectQueryDecoderSpec = Union[ObjectQueryDecoderConfig, Mapping[str, Any]]
 

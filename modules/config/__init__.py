@@ -1,4 +1,4 @@
-from modules.config.config import (
+from .config import (
     Config,
     DataConfig,
     ModelConfig,

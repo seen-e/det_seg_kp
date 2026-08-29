@@ -7,8 +7,8 @@ import torch
 from torch.optim import Optimizer
 from timm.utils import ModelEmaV2
 
-from modules.config import Config
-from modules.utils.distributed import unwrap_model
+from ..config import Config
+from .distributed import unwrap_model
 
 
 def save_checkpoint(

@@ -8,13 +8,13 @@ import timm
 import torch
 import torch.nn as nn
 
-from modules.backbone.features import (
+from .features import (
     FeatureMaps,
     parse_scale,
     resolve_feature_pyramids,
     scale_key,
 )
-from modules.backbone.vit_utils import extract_vit_tokens, pad_to_patch_size, tokens_to_feature_map
+from .vit_utils import extract_vit_tokens, pad_to_patch_size, tokens_to_feature_map
 
 
 @dataclass(frozen=True)
