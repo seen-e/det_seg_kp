@@ -21,11 +21,11 @@ def _select_memory_keys(scale_keys: List[str], memory_min_stride: int) -> Tuple[
     if keys:
         return tuple(keys)
     if not scale_keys:
-        raise ValueError("ObjectQueryDecoder needs at least one FPN scale_key")
+        raise ValueError("DeformDETRObjectDecoder needs at least one FPN scale_key")
     return (scale_keys[-1],)
 
 
-class ObjectQueryDecoder(nn.Module):
+class DeformDETRObjectDecoder(nn.Module):
     """Deformable-DETR decoder with iterative box refinement.
 
     Owns FPN → multi-scale memory projection (``memory_proj`` + level

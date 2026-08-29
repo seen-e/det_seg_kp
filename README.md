@@ -41,8 +41,8 @@ det_seg_kp/
 │   ├── det_seg_kp.py              # DetSegKPModel 组装 + DetSegKPHead
 │   ├── config/                    # VisionTower / PixelDecoder / ObjectQueryDecoder / Data / Train
 │   ├── backbone/                  # build_vision_tower
-│   ├── pixel_decoder/             # build_pixel_decoder
-│   ├── object_decoder/            # build_object_query_decoder（含 FPN→memory）
+│   ├── pixel_decoder/             # build_pixel_decoder（FPNPixelDecoder）
+│   ├── object_decoder/            # build_object_query_decoder（DeformDETRObjectDecoder）
 │   ├── ops/
 │   │   ├── deformable_decoder_layer.py
 │   │   └── ms_deform_atten_2D/    # MSDeformAttn（CUDA load，失败则 grid_sample）
@@ -142,8 +142,8 @@ torchrun --standalone --nproc_per_node=2 scripts/train.py --batch-size 4
 | Config | 默认要点 |
 | --- | --- |
 | `vision_tower` | `type="resnet"`（→ resnet50），`feature_pyramids=["4x","8x","16x"]` |
-| `pixel_decoder` | `pixel_dim=256`，`out_stride=4`，`in_channels` 对齐 ResNet-50 |
-| `object_query_decoder` | `hidden_dim=1024`，`num_layers=6`，`num_queries=100`，`scale_keys=["4x","8x","16x"]`，`memory_min_stride=8` |
+| `pixel_decoder` | `type="fpn"`，`pixel_dim=256`，`out_stride=4`，`in_channels` 对齐 ResNet-50 |
+| `object_query_decoder` | `type="deform_detr"`，`hidden_dim=1024`，`num_layers=6`，`num_queries=100`，`scale_keys=["4x","8x","16x"]`，`memory_min_stride=8` |
 | `ModelConfig` | `num_classes=1` |
 
 换 ViT-L 时：`vision_tower.type` 换成具体名字，`feature_pyramids=["14x"]`，并同步改 `pixel_decoder.in_channels` 与 `object_query_decoder.scale_keys` / `fpn_dim`。

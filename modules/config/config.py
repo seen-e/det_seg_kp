@@ -20,12 +20,15 @@ class VisionTowerConfig:
 
 @dataclass
 class ObjectQueryDecoderConfig:
-    """Deformable-DETR object query decoder + FPN memory builder.
+    """Object query decoder + FPN memory builder.
 
-    ``fpn_dim`` / ``scale_keys`` must match the pixel decoder FPN. Scales with
-    stride < ``memory_min_stride`` are skipped (stride-4 stays mask/kp only).
+    ``type`` selects the implementation (currently only ``deform_detr`` →
+    :class:`DeformDETRObjectDecoder`). ``fpn_dim`` / ``scale_keys`` must match
+    the pixel decoder FPN. Scales with stride < ``memory_min_stride`` are
+    skipped (stride-4 stays mask/kp only).
     """
 
+    type: str = "deform_detr"
     hidden_dim: int = 1024
     num_layers: int = 6
     num_heads: int = 8
@@ -39,13 +42,15 @@ class ObjectQueryDecoderConfig:
 
 @dataclass
 class PixelDecoderConfig:
-    """FPN pixel decoder for mask / keypoint features.
+    """Pixel decoder for mask / keypoint features.
 
-    ``in_channels`` maps FPN scale keys to backbone channel counts and must
-    match ``vision_tower`` outputs (default = ResNet-50 4x/8x/16x).
-    ``out_stride`` is the mask/kp feature stride (default 4).
+    ``type`` selects the implementation (currently only ``fpn`` →
+    :class:`FPNPixelDecoder`). ``in_channels`` maps FPN scale keys to backbone
+    channel counts and must match ``vision_tower`` outputs (default = ResNet-50
+    4x/8x/16x). ``out_stride`` is the mask/kp feature stride (default 4).
     """
 
+    type: str = "fpn"
     pixel_dim: int = 256
     out_stride: int = 4
     in_channels: Dict[str, int] = field(

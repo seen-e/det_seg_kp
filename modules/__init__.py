@@ -4,15 +4,15 @@ from .det_seg_kp import (
     postprocess,
 )
 from .backbone import FeatureMaps
-from .object_decoder import ObjectQueryDecoder, build_object_query_decoder
-from .pixel_decoder import PixelDecoder, build_pixel_decoder
+from .object_decoder import DeformDETRObjectDecoder, build_object_query_decoder
+from .pixel_decoder import FPNPixelDecoder, build_pixel_decoder
 
 __all__ = [
     "DetSegKPModel",
     "DetSegKPHead",
-    "PixelDecoder",
+    "FPNPixelDecoder",
     "build_pixel_decoder",
-    "ObjectQueryDecoder",
+    "DeformDETRObjectDecoder",
     "build_object_query_decoder",
     "FeatureMaps",
     "postprocess",

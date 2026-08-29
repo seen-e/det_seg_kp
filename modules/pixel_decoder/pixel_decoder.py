@@ -18,7 +18,7 @@ def _gn_groups(num_channels: int, max_groups: int = 32) -> int:
     return 1
 
 
-class PixelDecoder(nn.Module):
+class FPNPixelDecoder(nn.Module):
     """FPN pixel decoder (MaskFormer BasePixelDecoder / Mask2Former style).
 
     Consumes a :class:`FeatureMaps` dict (e.g. ``{'4x', '8x', '16x'}``).
@@ -34,7 +34,7 @@ class PixelDecoder(nn.Module):
         super().__init__()
         in_channels = dict(cfg.in_channels)
         if not in_channels:
-            raise ValueError("PixelDecoder needs at least one backbone scale in in_channels")
+            raise ValueError("FPNPixelDecoder needs at least one backbone scale in in_channels")
 
         pixel_dim = cfg.pixel_dim
         self.scale_keys = tuple(sorted(in_channels, key=parse_scale))
