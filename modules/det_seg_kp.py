@@ -277,7 +277,7 @@ class DetSegKPModel(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         self.cfg = cfg
-        self.vision_tower = build_vision_tower(cfg.vision_tower, cfg.pretrained_vision_tower)
+        self.vision_tower = build_vision_tower(cfg.vision_tower)
         in_channels = _tower_channels(self.vision_tower)
         self.pixel_decoder = PixelDecoder(
             in_channels=in_channels,

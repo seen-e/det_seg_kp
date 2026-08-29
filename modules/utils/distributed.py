@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Optional
 
 import torch
@@ -82,7 +83,11 @@ def init_wandb(args: argparse.Namespace, cfg: Config, world_size: int) -> Option
             "img_width": cfg.data.img_width,
             "img_height": cfg.data.img_height,
             "num_queries": cfg.model.num_queries,
-            "vision_tower": cfg.model.vision_tower,
+            "vision_tower": (
+                asdict(cfg.model.vision_tower)
+                if is_dataclass(cfg.model.vision_tower)
+                else cfg.model.vision_tower
+            ),
             "use_ema": cfg.train.use_ema,
             "ema_decay": cfg.train.ema_decay,
         },

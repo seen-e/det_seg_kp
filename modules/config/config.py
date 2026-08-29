@@ -1,5 +1,21 @@
 """Configuration for det + seg + keypoint model."""
 from dataclasses import dataclass, field
+from typing import List, Optional
+
+
+@dataclass
+class VisionTowerConfig:
+    """Vision backbone and which spatial scales it exposes.
+
+    ``type`` is a registry name (``resnet50``, ``dinov2_vitl14``, …) or a
+    family alias (``resnet`` → ``resnet50``). ``feature_pyramids`` selects
+    output scales; ``None`` keeps every native scale (ViT-L is typically
+    ``["14x"]``).
+    """
+
+    type: str = "resnet50"
+    feature_pyramids: Optional[List[str]] = None
+    pretrained: bool = True
 
 
 @dataclass
@@ -12,8 +28,13 @@ class ModelConfig:
     num_heads: int = 8
     num_deform_points: int = 4
     pixel_dim: int = 256
-    vision_tower: str = "resnet50"
-    pretrained_vision_tower: bool = True
+    vision_tower: VisionTowerConfig = field(
+        default_factory=lambda: VisionTowerConfig(
+            type="resnet",
+            feature_pyramids=["4x", "8x", "16x"],
+            pretrained=True,
+        )
+    )
 
 
 @dataclass

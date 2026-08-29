@@ -1,7 +1,7 @@
 """ResNet family vision towers (torchvision)."""
 from __future__ import annotations
 
-from typing import Dict, Tuple, Type
+from typing import Dict, Optional, Sequence, Tuple, Type
 
 import torch
 import torch.nn as nn
@@ -18,7 +18,7 @@ from torchvision.models import (
     resnet152,
 )
 
-from modules.backbone.features import FeatureMaps, channels_by_scale
+from modules.backbone.features import FeatureMaps, parse_scale, resolve_feature_pyramids
 
 # (builder, weights enum, channels of layer1 / layer2 / layer3 at 4x / 8x / 16x)
 ResNetSpec = Tuple[Type[nn.Module], object, Tuple[int, int, int]]
@@ -31,11 +31,18 @@ RESNET_SPECS: Dict[str, ResNetSpec] = {
     "resnet152": (resnet152, ResNet152_Weights, (256, 512, 1024)),
 }
 
+_NATIVE_PYRAMIDS = ("4x", "8x", "16x")
+
 
 class ResNetVisionTower(nn.Module):
-    """ResNet truncated at layer3; returns ``{'4x', '8x', '16x'}`` feature maps."""
+    """ResNet truncated at layer3; returns selected ``{'4x', '8x', '16x'}`` maps."""
 
-    def __init__(self, name: str, pretrained: bool = False):
+    def __init__(
+        self,
+        name: str,
+        pretrained: bool = False,
+        feature_pyramids: Optional[Sequence[str]] = None,
+    ):
         super().__init__()
         builder, weights_enum, out_channels = RESNET_SPECS[name]
         weights = weights_enum.DEFAULT if pretrained else None
@@ -51,19 +58,24 @@ class ResNetVisionTower(nn.Module):
         self.layer3 = backbone.layer3
         self.name = name
         c4, c8, c16 = out_channels
-        self.num_channels = channels_by_scale({4: c4, 8: c8, 16: c16})
-        self.stride = 16
+        native_channels = {"4x": c4, "8x": c8, "16x": c16}
+        self.feature_pyramids = resolve_feature_pyramids(
+            feature_pyramids, _NATIVE_PYRAMIDS, tower_name=name
+        )
+        self.num_channels = {key: native_channels[key] for key in self.feature_pyramids}
+        self.stride = max(parse_scale(key) for key in self.feature_pyramids)
 
     def forward(self, x: torch.Tensor) -> FeatureMaps:
         x = self.stem(x)
         c4 = self.layer1(x)
-        c8 = self.layer2(c4)
-        c16 = self.layer3(c8)
+        maps = {"4x": c4}
+        need = {parse_scale(key) for key in self.feature_pyramids}
+        if 8 in need or 16 in need:
+            c8 = self.layer2(c4)
+            maps["8x"] = c8
+            if 16 in need:
+                maps["16x"] = self.layer3(c8)
         return FeatureMaps(
-            {
-                "4x": c4,
-                "8x": c8,
-                "16x": c16,
-            },
+            {key: maps[key] for key in self.feature_pyramids},
             name=self.name,
         )

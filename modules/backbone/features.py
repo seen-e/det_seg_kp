@@ -1,7 +1,7 @@
 """Multi-scale feature maps returned by vision towers."""
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 import torch
 
@@ -21,6 +21,38 @@ def parse_scale(key: str) -> int:
 
 def channels_by_scale(stride_to_channels: Mapping[int, int]) -> Dict[str, int]:
     return {scale_key(stride): int(ch) for stride, ch in stride_to_channels.items()}
+
+
+def normalize_scale_key(key: str | int) -> str:
+    """Canonical pyramid key: ``4`` / ``'4'`` / ``'4x'`` -> ``'4x'``."""
+    if isinstance(key, int):
+        return scale_key(key)
+    return scale_key(parse_scale(key))
+
+
+def resolve_feature_pyramids(
+    requested: Optional[Sequence[str | int]],
+    available: Sequence[str],
+    *,
+    tower_name: str,
+) -> tuple[str, ...]:
+    """Pick which spatial scales a tower should expose.
+
+    ``requested is None`` or empty keeps every native scale (ViT-L → ``('14x',)``).
+    """
+    available_keys = tuple(normalize_scale_key(key) for key in available)
+    if not available_keys:
+        raise ValueError(f"vision tower '{tower_name}' has no native feature pyramids")
+    if not requested:
+        return available_keys
+    keys = tuple(normalize_scale_key(key) for key in requested)
+    missing = [key for key in keys if key not in available_keys]
+    if missing:
+        raise ValueError(
+            f"vision tower '{tower_name}' cannot provide {missing}; "
+            f"available pyramids: {list(available_keys)}"
+        )
+    return keys
 
 
 class FeatureMaps(dict):
@@ -83,6 +115,14 @@ class FeatureMaps(dict):
         """Drop any non-tensor entries if a plain dict mixed in metadata."""
         return FeatureMaps(
             {k: v for k, v in self.items() if torch.is_tensor(v)},
+            name=self.name,
+            extra=self.extra,
+        )
+
+    def subset(self, keys: Sequence[str]) -> "FeatureMaps":
+        """Keep the listed pyramid keys, in that order."""
+        return FeatureMaps(
+            {key: self[key] for key in keys},
             name=self.name,
             extra=self.extra,
         )

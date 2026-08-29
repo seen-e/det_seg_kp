@@ -2,13 +2,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Optional, Sequence
 
 import timm
 import torch
 import torch.nn as nn
 
-from modules.backbone.features import FeatureMaps, scale_key
+from modules.backbone.features import (
+    FeatureMaps,
+    parse_scale,
+    resolve_feature_pyramids,
+    scale_key,
+)
 from modules.backbone.vit_utils import extract_vit_tokens, pad_to_patch_size, tokens_to_feature_map
 
 
@@ -44,7 +49,12 @@ CLIP_CONVNeXT_SPECS: Dict[str, CLIPConvNeXtVisionTowerSpec] = {
 class CLIPViTVisionTower(nn.Module):
     """CLIP ViT; outputs spatial feature map from patch tokens."""
 
-    def __init__(self, name: str, pretrained: bool = False):
+    def __init__(
+        self,
+        name: str,
+        pretrained: bool = False,
+        feature_pyramids: Optional[Sequence[str]] = None,
+    ):
         super().__init__()
         spec = CLIP_VIT_SPECS[name]
         self.name = name
@@ -54,25 +64,35 @@ class CLIPViTVisionTower(nn.Module):
             num_classes=0,
             dynamic_img_size=True,
         )
-        self.stride = spec.patch_size
-        self.num_channels = {scale_key(spec.patch_size): spec.embed_dim}
+        native = (scale_key(spec.patch_size),)
+        self.feature_pyramids = resolve_feature_pyramids(
+            feature_pyramids, native, tower_name=name
+        )
+        self.num_channels = {key: spec.embed_dim for key in self.feature_pyramids}
+        self.stride = max(parse_scale(key) for key in self.feature_pyramids)
         self._patch_size = spec.patch_size
 
     def forward(self, x: torch.Tensor) -> FeatureMaps:
         x, pad_h, pad_w = pad_to_patch_size(x, self._patch_size)
         tokens = extract_vit_tokens(self.body.forward_features(x), "x")
         fmap = tokens_to_feature_map(tokens, self._patch_size)
-        return FeatureMaps(
+        maps = FeatureMaps(
             {scale_key(self._patch_size): fmap},
             name=self.name,
             extra={"pad_h": pad_h, "pad_w": pad_w, "patch_size": self._patch_size},
         )
+        return maps.subset(self.feature_pyramids)
 
 
 class CLIPConvNeXtVisionTower(nn.Module):
-    """CLIP ConvNeXt; returns ``{'4x', '8x', '16x'}`` maps via timm features_only."""
+    """CLIP ConvNeXt; returns selected ``{'4x', '8x', '16x'}`` maps via timm features_only."""
 
-    def __init__(self, name: str, pretrained: bool = False):
+    def __init__(
+        self,
+        name: str,
+        pretrained: bool = False,
+        feature_pyramids: Optional[Sequence[str]] = None,
+    ):
         super().__init__()
         spec = CLIP_CONVNeXT_SPECS[name]
         self.name = name
@@ -86,13 +106,19 @@ class CLIPConvNeXtVisionTower(nn.Module):
         info = self.body.feature_info
         reductions = tuple(int(s) for s in info.reduction())
         channels = tuple(int(c) for c in info.channels())
-        self.num_channels = {scale_key(s): c for s, c in zip(reductions, channels)}
-        self.stride = int(reductions[-1])
+        native = tuple(scale_key(s) for s in reductions)
+        native_channels = {scale_key(s): c for s, c in zip(reductions, channels)}
+        self.feature_pyramids = resolve_feature_pyramids(
+            feature_pyramids, native, tower_name=name
+        )
+        self.num_channels = {key: native_channels[key] for key in self.feature_pyramids}
+        self.stride = max(parse_scale(key) for key in self.feature_pyramids)
+        self._native = native
 
     def forward(self, x: torch.Tensor) -> FeatureMaps:
         maps = list(self.body(x))
-        features = {
-            key: tensor
-            for key, tensor in zip(self.num_channels.keys(), maps)
-        }
-        return FeatureMaps(features, name=self.name)
+        features = FeatureMaps(
+            {key: tensor for key, tensor in zip(self._native, maps)},
+            name=self.name,
+        )
+        return features.subset(self.feature_pyramids)
