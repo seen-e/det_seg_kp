@@ -10,7 +10,7 @@
 #   NPROC_PER_NODE   GPUs per node (default: auto-detect)
 #   WARMUP_RATIO     LR warmup fraction of epochs (default: 0 = off)
 #   DATA_ROOT        dataset root (default: ./data)
-#   OUTPUT_DIR       checkpoint directory (default: ./outputs)
+#   OUTPUT_DIR       checkpoint directory (default: ./work_dirs)
 #   WANDB=0          disable Weights & Biases (default: on)
 
 set -euo pipefail
@@ -34,7 +34,7 @@ LOG_INTERVAL="${LOG_INTERVAL:-10}"
 VIS_INTERVAL="${VIS_INTERVAL:-100}"
 VAL_INTERVAL="${VAL_INTERVAL:-1000}"
 SAVE_INTERVAL="${SAVE_INTERVAL:-5000}"
-OUTPUT_DIR="${OUTPUT_DIR:-./outputs}"
+OUTPUT_DIR="${OUTPUT_DIR:-./work_dirs}"
 SEED="${SEED:-42}"
 DIST_BACKEND="${DIST_BACKEND:-nccl}"
 

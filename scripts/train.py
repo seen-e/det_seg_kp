@@ -261,7 +261,7 @@ def main() -> None:
         cfg.data.data_root = args.data_root
         cfg.data.stride = args.stride
         cfg.data.num_workers = args.num_workers
-        cfg.model.num_queries = args.num_queries
+        cfg.model.object_query_decoder.num_queries = args.num_queries
         if cfg.data.img_width % cfg.data.stride != 0 or cfg.data.img_height % cfg.data.stride != 0:
             raise ValueError(
                 f"img_width={cfg.data.img_width}, img_height={cfg.data.img_height} "

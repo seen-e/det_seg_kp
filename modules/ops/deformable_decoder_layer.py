@@ -5,7 +5,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-from timm.layers import DropPath
+from timm.layers import Mlp
 
 from modules.ops.ms_deform_atten_2D import MSDeformAttn
 
@@ -25,16 +25,14 @@ class DeformableDecoderLayer(nn.Module):
             d_model, n_heads, dropout=dropout, batch_first=True
         )
         self.cross_attn = MSDeformAttn(d_model, n_levels, n_heads, n_points)
-        self.ffn = nn.Sequential(
-            nn.Linear(d_model, dim_feedforward),
-            nn.ReLU(),
-            nn.Linear(dim_feedforward, d_model),
+        self.ffn = Mlp(
+            d_model, dim_feedforward, d_model, act_layer=nn.ReLU, drop=(dropout, 0.0)
         )
-        self.drop_path = DropPath(dropout) if dropout > 0.0 else nn.Identity()
+        self.dropout = nn.Dropout(dropout)
         self.norm = nn.ModuleList(nn.LayerNorm(d_model) for _ in range(3))
 
     def _residual(self, x: torch.Tensor, y: torch.Tensor, i: int) -> torch.Tensor:
-        return self.norm[i](x + self.drop_path(y))
+        return self.norm[i](x + self.dropout(y))
 
     def forward(
         self,

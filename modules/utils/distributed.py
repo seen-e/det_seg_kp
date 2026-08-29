@@ -82,11 +82,21 @@ def init_wandb(args: argparse.Namespace, cfg: Config, world_size: int) -> Option
             "precision": cfg.train.precision,
             "img_width": cfg.data.img_width,
             "img_height": cfg.data.img_height,
-            "num_queries": cfg.model.num_queries,
+            "num_queries": cfg.model.object_query_decoder.num_queries,
             "vision_tower": (
                 asdict(cfg.model.vision_tower)
                 if is_dataclass(cfg.model.vision_tower)
                 else cfg.model.vision_tower
+            ),
+            "pixel_decoder": (
+                asdict(cfg.model.pixel_decoder)
+                if is_dataclass(cfg.model.pixel_decoder)
+                else cfg.model.pixel_decoder
+            ),
+            "object_query_decoder": (
+                asdict(cfg.model.object_query_decoder)
+                if is_dataclass(cfg.model.object_query_decoder)
+                else cfg.model.object_query_decoder
             ),
             "use_ema": cfg.train.use_ema,
             "ema_decay": cfg.train.ema_decay,

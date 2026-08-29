@@ -1,6 +1,6 @@
 """Configuration for det + seg + keypoint model."""
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -19,21 +19,53 @@ class VisionTowerConfig:
 
 
 @dataclass
+class ObjectQueryDecoderConfig:
+    """Deformable-DETR object query decoder + FPN memory builder.
+
+    ``fpn_dim`` / ``scale_keys`` must match the pixel decoder FPN. Scales with
+    stride < ``memory_min_stride`` are skipped (stride-4 stays mask/kp only).
+    """
+
+    hidden_dim: int = 1024
+    num_layers: int = 6
+    num_heads: int = 8
+    num_queries: int = 100
+    n_points: int = 4
+    dropout: float = 0.1
+    fpn_dim: int = 256
+    scale_keys: List[str] = field(default_factory=lambda: ["4x", "8x", "16x"])
+    memory_min_stride: int = 8
+
+
+@dataclass
+class PixelDecoderConfig:
+    """FPN pixel decoder for mask / keypoint features.
+
+    ``in_channels`` maps FPN scale keys to backbone channel counts and must
+    match ``vision_tower`` outputs (default = ResNet-50 4x/8x/16x).
+    ``out_stride`` is the mask/kp feature stride (default 4).
+    """
+
+    pixel_dim: int = 256
+    out_stride: int = 4
+    in_channels: Dict[str, int] = field(
+        default_factory=lambda: {"4x": 256, "8x": 512, "16x": 1024}
+    )
+
+
+@dataclass
 class ModelConfig:
     num_classes: int = 1
-    num_queries: int = 100
-    num_kps: int = 8
-    hidden_dim: int = 1024
-    num_decoder_layers: int = 6
-    num_heads: int = 8
-    num_deform_points: int = 4
-    pixel_dim: int = 256
     vision_tower: VisionTowerConfig = field(
         default_factory=lambda: VisionTowerConfig(
             type="resnet",
             feature_pyramids=["4x", "8x", "16x"],
             pretrained=True,
         )
+    )
+    pixel_decoder: PixelDecoderConfig = field(default_factory=PixelDecoderConfig)
+    object_query_decoder: ObjectQueryDecoderConfig = field(
+        default_factory=ObjectQueryDecoderConfig
     )
 
 

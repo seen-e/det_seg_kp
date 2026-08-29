@@ -279,7 +279,7 @@ def build_criterion(cfg) -> DetSegKPLoss:
         "loss_dice": cfg.train.loss_dice,
         "loss_kp": cfg.train.loss_kp,
     }
-    for i in range(max(int(cfg.model.num_decoder_layers) - 1, 0)):
+    for i in range(max(int(cfg.model.object_query_decoder.num_layers) - 1, 0)):
         for key in ("loss_cls", "loss_bbox", "loss_giou"):
             weight_dict[f"{key}_{i}"] = weight_dict[key]
     return DetSegKPLoss(
