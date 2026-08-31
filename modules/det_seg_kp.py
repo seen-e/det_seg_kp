@@ -66,7 +66,7 @@ class DetSegKPModel(nn.Module):
 
     Pipeline:
       image -> vision_tower -> FPN pixel_decoder -> pixel_features (stride 4)
-                            -> multi-scale memory (stride >= 8) -> Deformable-DETR decoder
+                            -> multi-scale FPN memory -> Deformable-DETR decoder
       obj_queries + pixel_features -> class / mask / kp heads; boxes from decoder
     """
 

@@ -25,7 +25,7 @@ class ObjectQueryDecoderConfig:
     ``type`` selects the implementation (currently only ``deform_detr`` →
     :class:`DeformDETRObjectDecoder`). ``fpn_dim`` / ``scale_keys`` must match
     the pixel decoder FPN. Scales with stride < ``memory_min_stride`` are
-    skipped (stride-4 stays mask/kp only).
+    skipped (default 4 keeps every configured FPN level).
     """
 
     type: str = "deform_detr"
@@ -36,8 +36,8 @@ class ObjectQueryDecoderConfig:
     n_points: int = 4
     dropout: float = 0.1
     fpn_dim: int = 256
-    scale_keys: List[str] = field(default_factory=lambda: ["4x", "8x", "16x"])
-    memory_min_stride: int = 8
+    scale_keys: List[str] = field(default_factory=lambda: ["4x", "8x", "16x", "32x"])
+    memory_min_stride: int = 4
 
 
 @dataclass
@@ -54,7 +54,7 @@ class PixelDecoderConfig:
     pixel_dim: int = 256
     out_stride: int = 4
     in_channels: Dict[str, int] = field(
-        default_factory=lambda: {"4x": 256, "8x": 512, "16x": 1024}
+        default_factory=lambda: {"4x": 256, "8x": 512, "16x": 1024, "32x": 2048}
     )
 
 
@@ -66,7 +66,7 @@ class ModelConfig:
     vision_tower: VisionTowerConfig = field(
         default_factory=lambda: VisionTowerConfig(
             type="resnet",
-            feature_pyramids=["4x", "8x", "16x"],
+            feature_pyramids=["4x", "8x", "16x", "32x"],
             pretrained=True,
         )
     )

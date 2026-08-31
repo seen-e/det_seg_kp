@@ -20,22 +20,22 @@ from torchvision.models import (
 
 from .features import FeatureMaps, parse_scale, resolve_feature_pyramids
 
-# (builder, weights enum, channels of layer1 / layer2 / layer3 at 4x / 8x / 16x)
-ResNetSpec = Tuple[Type[nn.Module], object, Tuple[int, int, int]]
+# (builder, weights enum, channels of layer1–4 at 4x / 8x / 16x / 32x)
+ResNetSpec = Tuple[Type[nn.Module], object, Tuple[int, int, int, int]]
 
 RESNET_SPECS: Dict[str, ResNetSpec] = {
-    "resnet18": (resnet18, ResNet18_Weights, (64, 128, 256)),
-    "resnet34": (resnet34, ResNet34_Weights, (64, 128, 256)),
-    "resnet50": (resnet50, ResNet50_Weights, (256, 512, 1024)),
-    "resnet101": (resnet101, ResNet101_Weights, (256, 512, 1024)),
-    "resnet152": (resnet152, ResNet152_Weights, (256, 512, 1024)),
+    "resnet18": (resnet18, ResNet18_Weights, (64, 128, 256, 512)),
+    "resnet34": (resnet34, ResNet34_Weights, (64, 128, 256, 512)),
+    "resnet50": (resnet50, ResNet50_Weights, (256, 512, 1024, 2048)),
+    "resnet101": (resnet101, ResNet101_Weights, (256, 512, 1024, 2048)),
+    "resnet152": (resnet152, ResNet152_Weights, (256, 512, 1024, 2048)),
 }
 
-_NATIVE_PYRAMIDS = ("4x", "8x", "16x")
+_NATIVE_PYRAMIDS = ("4x", "8x", "16x", "32x")
 
 
 class ResNetVisionTower(nn.Module):
-    """ResNet truncated at layer3; returns selected ``{'4x', '8x', '16x'}`` maps."""
+    """ResNet through layer4; returns selected ``{'4x', '8x', '16x', '32x'}`` maps."""
 
     def __init__(
         self,
@@ -56,9 +56,10 @@ class ResNetVisionTower(nn.Module):
         self.layer1 = backbone.layer1
         self.layer2 = backbone.layer2
         self.layer3 = backbone.layer3
+        self.layer4 = backbone.layer4
         self.name = name
-        c4, c8, c16 = out_channels
-        native_channels = {"4x": c4, "8x": c8, "16x": c16}
+        c4, c8, c16, c32 = out_channels
+        native_channels = {"4x": c4, "8x": c8, "16x": c16, "32x": c32}
         self.feature_pyramids = resolve_feature_pyramids(
             feature_pyramids, _NATIVE_PYRAMIDS, tower_name=name
         )
@@ -70,11 +71,14 @@ class ResNetVisionTower(nn.Module):
         c4 = self.layer1(x)
         maps = {"4x": c4}
         need = {parse_scale(key) for key in self.feature_pyramids}
-        if 8 in need or 16 in need:
+        if 8 in need or 16 in need or 32 in need:
             c8 = self.layer2(c4)
             maps["8x"] = c8
-            if 16 in need:
-                maps["16x"] = self.layer3(c8)
+            if 16 in need or 32 in need:
+                c16 = self.layer3(c8)
+                maps["16x"] = c16
+                if 32 in need:
+                    maps["32x"] = self.layer4(c16)
         return FeatureMaps(
             {key: maps[key] for key in self.feature_pyramids},
             name=self.name,
