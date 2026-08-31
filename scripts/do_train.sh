@@ -8,32 +8,24 @@
 #
 # Environment overrides (optional):
 #   NPROC_PER_NODE   GPUs per node (default: auto-detect)
-#   WARMUP_RATIO     LR warmup fraction of epochs (default: 0 = off)
 #   DATA_ROOT        dataset root (default: ./data)
 #   OUTPUT_DIR       checkpoint directory (default: ./work_dirs)
 #   WANDB=0          disable Weights & Biases (default: on)
+#
+# Less common settings use --opt (see modules.config.Config):
+#   bash scripts/do_train.sh --opt data.img_width=1280 --opt train.val_interval=500
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# Defaults (override via env or pass extra flags through to train.py)
 EPOCHS="${EPOCHS:-50000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 LR="${LR:-1e-4}"
 WARMUP_RATIO="${WARMUP_RATIO:-0}"
 PRECISION="${PRECISION:-bf16}"
-IMG_WIDTH="${IMG_WIDTH:-960}"
-IMG_HEIGHT="${IMG_HEIGHT:-768}"
-STRIDE="${STRIDE:-4}"
 DATA_ROOT="${DATA_ROOT:-./data}"
-NUM_QUERIES="${NUM_QUERIES:-100}"
-NUM_WORKERS="${NUM_WORKERS:-8}"
-LOG_INTERVAL="${LOG_INTERVAL:-10}"
-VIS_INTERVAL="${VIS_INTERVAL:-100}"
-VAL_INTERVAL="${VAL_INTERVAL:-1000}"
-SAVE_INTERVAL="${SAVE_INTERVAL:-5000}"
 OUTPUT_DIR="${OUTPUT_DIR:-./work_dirs}"
 SEED="${SEED:-42}"
 DIST_BACKEND="${DIST_BACKEND:-nccl}"
@@ -57,19 +49,19 @@ TRAIN_ARGS=(
   --lr "$LR"
   --warmup-ratio "$WARMUP_RATIO"
   --precision "$PRECISION"
-  --img-width "$IMG_WIDTH"
-  --img-height "$IMG_HEIGHT"
-  --stride "$STRIDE"
   --data-root "$DATA_ROOT"
-  --num-queries "$NUM_QUERIES"
-  --num-workers "$NUM_WORKERS"
-  --log-interval "$LOG_INTERVAL"
-  --vis-interval "$VIS_INTERVAL"
-  --val-interval "$VAL_INTERVAL"
-  --save-interval "$SAVE_INTERVAL"
   --output-dir "$OUTPUT_DIR"
   --seed "$SEED"
   --dist-backend "$DIST_BACKEND"
+  --opt "data.img_width=${IMG_WIDTH:-960}"
+  --opt "data.img_height=${IMG_HEIGHT:-768}"
+  --opt "data.stride=${STRIDE:-4}"
+  --opt "data.num_workers=${NUM_WORKERS:-8}"
+  --opt "model.object_query_decoder.num_queries=${NUM_QUERIES:-100}"
+  --opt "train.log_interval=${LOG_INTERVAL:-10}"
+  --opt "train.vis_interval=${VIS_INTERVAL:-100}"
+  --opt "train.val_interval=${VAL_INTERVAL:-1000}"
+  --opt "train.save_interval=${SAVE_INTERVAL:-5000}"
 )
 
 if [[ "${WANDB:-1}" == "1" ]]; then
@@ -78,13 +70,11 @@ if [[ "${WANDB:-1}" == "1" ]]; then
   [[ -n "$WANDB_ENTITY" ]] && TRAIN_ARGS+=(--wandb-entity "$WANDB_ENTITY")
 fi
 
-# Extra CLI args forwarded to train.py (e.g. --epochs 100)
 TRAIN_ARGS+=("$@")
 
 echo "Project root: $ROOT"
 echo "GPUs (NPROC_PER_NODE): $NPROC_PER_NODE"
 echo "Data root: $DATA_ROOT"
-echo "Input: ${IMG_WIDTH}x${IMG_HEIGHT}  stride=${STRIDE}"
 echo "Output dir: $OUTPUT_DIR"
 echo "wandb: ${WANDB:-1}"
 

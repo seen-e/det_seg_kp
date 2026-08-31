@@ -1,7 +1,6 @@
 """Distributed training and logging helpers."""
 from __future__ import annotations
 
-import argparse
 import os
 from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Optional
@@ -63,19 +62,19 @@ def log_info(rank: int, msg: str) -> None:
         print(msg, flush=True)
 
 
-def init_wandb(args: argparse.Namespace, cfg: Config, world_size: int) -> Optional[Any]:
-    """Initialize Weights & Biases on the main process when ``args.wandb`` is set."""
-    if not args.wandb:
+def init_wandb(cfg: Config, world_size: int, wandb_tags: Optional[list] = None) -> Optional[Any]:
+    """Initialize Weights & Biases on the main process when ``cfg.train.use_wandb`` is set."""
+    if not cfg.train.use_wandb:
         return None
     import wandb
 
-    run_name = args.wandb_run_name or None
+    run_name = cfg.train.wandb_run_name or None
     wandb.init(
-        project=args.wandb_project,
-        entity=args.wandb_entity or None,
+        project=cfg.train.wandb_project,
+        entity=cfg.train.wandb_entity or None,
         name=run_name,
         dir=cfg.train.output_dir,
-        tags=args.wandb_tags,
+        tags=wandb_tags,
         config={
             "epochs": cfg.train.epochs,
             "batch_size_per_gpu": cfg.train.batch_size,

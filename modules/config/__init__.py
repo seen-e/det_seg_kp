@@ -7,6 +7,7 @@ from .config import (
     TrainConfig,
     VisionTowerConfig,
 )
+from .cli import build_train_parser, config_from_args, parse_train_args
 
 __all__ = [
     "Config",
@@ -16,4 +17,7 @@ __all__ = [
     "PixelDecoderConfig",
     "TrainConfig",
     "VisionTowerConfig",
+    "build_train_parser",
+    "config_from_args",
+    "parse_train_args",
 ]
