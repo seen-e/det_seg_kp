@@ -3,6 +3,9 @@
 Thresholds for side / area are specified in *heatmap* space and scaled by
 ``stride`` / ``stride**2`` so a larger stride filters more aggressively.
 ``min_mask_pixels`` is counted on the downsampled id-mask (already stride-aware).
+
+When ``boxes`` (exclusive xyxy, aligned with instance ids) are provided, side /
+area filters use them and skip scanning the full-resolution mask.
 """
 from __future__ import annotations
 
@@ -20,16 +23,9 @@ _BG = 255
 
 def _instance_aabbs(mask: np.ndarray, num_instances: int) -> np.ndarray:
     """Per-instance AABB in input pixels: (N, 4) as x0, y0, x1, y1 (x1/y1 exclusive)."""
-    boxes = np.zeros((num_instances, 4), dtype=np.float32)
-    for i in range(num_instances):
-        ys, xs = np.where(mask == i)
-        if xs.size == 0:
-            continue
-        boxes[i, 0] = float(xs.min())
-        boxes[i, 1] = float(ys.min())
-        boxes[i, 2] = float(xs.max()) + 1.0
-        boxes[i, 3] = float(ys.max()) + 1.0
-    return boxes
+    from scripts.gen_train_sample import mask_id_to_boxes_xyxy
+
+    return mask_id_to_boxes_xyxy(mask, num_instances, exclusive=True)
 
 
 def _downsample_id_mask(mask: np.ndarray, stride: int) -> np.ndarray:
@@ -48,14 +44,13 @@ def apply_keep(
     kps: np.ndarray,
     labels: np.ndarray,
     keep: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    boxes: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """Drop instances where ``keep`` is False; remap remaining ids to 0..K-1."""
     kps = ensure_kps_xyv(kps)
     labels = np.asarray(labels, dtype=np.int64)
     keep = np.asarray(keep, dtype=bool)
-    n = int(keep.shape[0])
-    if n == 0 or keep.all():
-        return mask, kps, labels
+    boxes_arr = None if boxes is None else np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
 
     old_ids = np.nonzero(keep)[0]
     if old_ids.size == 0:
@@ -64,12 +59,15 @@ def apply_keep(
             out_mask,
             np.zeros((0, 8, 3), dtype=np.float32),
             np.zeros((0,), dtype=np.int64),
+            np.zeros((0, 4), dtype=np.float32) if boxes_arr is not None else None,
         )
 
-    out_mask = np.full(mask.shape, _BG, dtype=np.uint8)
+    lut = np.full(256, _BG, dtype=np.uint8)
     for new_id, old_id in enumerate(old_ids):
-        out_mask[mask == int(old_id)] = new_id
-    return out_mask, kps[keep], labels[keep]
+        lut[int(old_id)] = np.uint8(new_id)
+    out_mask = lut[mask]
+    out_boxes = boxes_arr[keep] if boxes_arr is not None else None
+    return out_mask, kps[keep], labels[keep], out_boxes
 
 
 class InstanceFilter(ABC):
@@ -83,6 +81,7 @@ class InstanceFilter(ABC):
         labels: np.ndarray,
         *,
         stride: int,
+        boxes: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Return bool array of shape (N,)."""
 
@@ -100,11 +99,15 @@ class MinBoxSideFilter(InstanceFilter):
         labels: np.ndarray,
         *,
         stride: int,
+        boxes: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         n = int(np.asarray(labels).shape[0])
         if n == 0 or self.min_side_hm <= 0:
             return np.ones((n,), dtype=bool)
-        boxes = _instance_aabbs(mask, n)
+        if boxes is None:
+            boxes = _instance_aabbs(mask, n)
+        else:
+            boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
         w = boxes[:, 2] - boxes[:, 0]
         h = boxes[:, 3] - boxes[:, 1]
         thresh = self.min_side_hm * float(stride)
@@ -124,11 +127,15 @@ class MinBoxAreaFilter(InstanceFilter):
         labels: np.ndarray,
         *,
         stride: int,
+        boxes: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         n = int(np.asarray(labels).shape[0])
         if n == 0 or self.min_area_hm <= 0:
             return np.ones((n,), dtype=bool)
-        boxes = _instance_aabbs(mask, n)
+        if boxes is None:
+            boxes = _instance_aabbs(mask, n)
+        else:
+            boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
         area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
         thresh = self.min_area_hm * float(stride) ** 2
         return area >= thresh
@@ -147,19 +154,21 @@ class MinMaskPixelsFilter(InstanceFilter):
         labels: np.ndarray,
         *,
         stride: int,
+        boxes: Optional[np.ndarray] = None,
     ) -> np.ndarray:
+        del boxes  # unused; counts come from the mask
         n = int(np.asarray(labels).shape[0])
         if n == 0 or self.min_pixels <= 0:
             return np.ones((n,), dtype=bool)
         mask_ds = _downsample_id_mask(mask, stride)
-        counts = np.zeros((n,), dtype=np.int64)
-        for i in range(n):
-            counts[i] = int((mask_ds == i).sum())
+        flat = mask_ds.ravel()
+        valid = flat < n
+        counts = np.bincount(flat[valid], minlength=n)[:n]
         return counts >= self.min_pixels
 
 
 class ComposeInstanceFilters:
-    """AND-compose filters, then remap mask / kps / labels."""
+    """AND-compose filters, then remap mask / kps / labels / boxes."""
 
     def __init__(self, filters: Optional[Sequence[InstanceFilter]] = None):
         self.filters: List[InstanceFilter] = list(filters or [])
@@ -169,19 +178,19 @@ class ComposeInstanceFilters:
         mask: np.ndarray,
         kps: np.ndarray,
         labels: np.ndarray,
+        boxes: Optional[np.ndarray] = None,
         *,
         stride: int,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
         labels = np.asarray(labels, dtype=np.int64)
         kps = ensure_kps_xyv(kps)
         n = int(labels.shape[0])
-        if n == 0 or not self.filters:
-            return mask, kps, labels
+        boxes_arr = None if boxes is None else np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
 
         keep = np.ones((n,), dtype=bool)
         for f in self.filters:
-            keep &= f.keep(mask, kps, labels, stride=stride)
-        return apply_keep(mask, kps, labels, keep)
+            keep &= f.keep(mask, kps, labels, stride=stride, boxes=boxes_arr)
+        return apply_keep(mask, kps, labels, keep, boxes_arr)
 
 
 def build_instance_filters(

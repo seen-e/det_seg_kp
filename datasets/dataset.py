@@ -109,6 +109,23 @@ def kps_to_heatmaps(
     return out
 
 
+def boxes_xyxy_to_cxcywh_norm(boxes: np.ndarray, height: int, width: int) -> np.ndarray:
+    """Exclusive xyxy (N,4) → normalized cxcywh in [0, 1]. Empty → small centered box."""
+    boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
+    out = np.zeros((boxes.shape[0], 4), dtype=np.float32)
+    w = float(width)
+    h = float(height)
+    bw = boxes[:, 2] - boxes[:, 0]
+    bh = boxes[:, 3] - boxes[:, 1]
+    valid = (bw > 0) & (bh > 0)
+    out[:, :] = (0.5, 0.5, 0.1, 0.1)
+    out[valid, 0] = 0.5 * (boxes[valid, 0] + boxes[valid, 2]) / w
+    out[valid, 1] = 0.5 * (boxes[valid, 1] + boxes[valid, 3]) / h
+    out[valid, 2] = bw[valid] / w
+    out[valid, 3] = bh[valid] / h
+    return out
+
+
 def masks_to_boxes_cxcywh(masks: np.ndarray) -> np.ndarray:
     """Tight AABB of each binary mask, normalized cxcywh in [0, 1]."""
     n, h, w = masks.shape
@@ -284,26 +301,21 @@ class DetSegKPDataset(Dataset):
             mask = mask[..., 0]
         kps = ensure_kps_xyv(np.asarray(sample["kps"], dtype=np.float32))
         labels = np.asarray(sample["inst_labels"], dtype=np.int64)
-        if labels.size == 0:
-            labels = np.zeros((kps.shape[0],), dtype=np.int64)
-        elif labels.shape[0] != kps.shape[0]:
-            n = kps.shape[0]
-            out = np.zeros((n,), dtype=np.int64)
-            out[: min(n, labels.shape[0])] = labels[: min(n, labels.shape[0])]
-            labels = out
+        boxes = np.asarray(sample["boxes"], dtype=np.float32).reshape(-1, 4)
         return {
             "image": image,
             "mask": mask,
             "kps": kps,
             "labels": labels,
+            "boxes": boxes,
             "stem": entry["id"],
         }
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         entry = self.samples[idx]
         raw = self._load_raw(entry)
-        image, mask, kps, labels = self.transform(
-            raw["image"], raw["mask"], raw["kps"], raw["labels"]
+        image, mask, kps, labels, boxes_xyxy = self.transform(
+            raw["image"], raw["mask"], raw["kps"], raw["labels"], raw["boxes"],
         )
 
         rgb = np.asarray(image, dtype=np.float32) / 255.0
@@ -311,8 +323,7 @@ class DetSegKPDataset(Dataset):
         hs, ws = h // self.stride, w // self.stride
         num_inst = int(kps.shape[0]) if kps.size else 0
 
-        binary_full = instance_mask_to_binary(mask, num_inst)
-        boxes = masks_to_boxes_cxcywh(binary_full)
+        boxes = boxes_xyxy_to_cxcywh_norm(boxes_xyxy, h, w)
 
         mask_ds = downsample_id_mask(mask, self.stride)
         binary = instance_mask_to_binary(mask_ds, num_inst)

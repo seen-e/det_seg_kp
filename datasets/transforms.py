@@ -1,7 +1,8 @@
 """Geometric and photometric augmentation for image / instance-mask / kps.
 
-All geometric ops keep the three aligned. Color jitter is image-only.
-Instance filters run after geometry (and labels stay in sync).
+Geometric ops (scale / crop / hflip) are composed into one affine and applied
+once via ``cv2.warpAffine``. Color jitter is image-only. Instance filters run
+after geometry (labels stay in sync).
 
 Box corner order (from gen_train_sample): bottom 0-3 CCW, top 4-7 CCW,
 local +X = width. Horizontal flip swaps left/right corners:
@@ -12,6 +13,7 @@ from __future__ import annotations
 import random
 from typing import Tuple
 
+import cv2
 import numpy as np
 from PIL import Image
 from torchvision.transforms import ColorJitter
@@ -23,6 +25,8 @@ from .filter import ComposeInstanceFilters, build_instance_filters
 
 # After a left-right flip, remap corner indices so semantic identity is kept.
 _FLIP_CORNER_PERM = np.array([1, 0, 3, 2, 5, 4, 7, 6], dtype=np.int64)
+
+_MASK_BG = 255
 
 
 def invalidate_oob_kps(kps: np.ndarray, width: int, height: int) -> np.ndarray:
@@ -37,80 +41,124 @@ def invalidate_oob_kps(kps: np.ndarray, width: int, height: int) -> np.ndarray:
     return kps
 
 
-def _resize(
-    image: Image.Image,
+def _eye3() -> np.ndarray:
+    return np.eye(3, dtype=np.float64)
+
+
+def _scale_mat(sx: float, sy: float) -> np.ndarray:
+    M = _eye3()
+    M[0, 0] = float(sx)
+    M[1, 1] = float(sy)
+    return M
+
+
+def _translate_mat(tx: float, ty: float) -> np.ndarray:
+    M = _eye3()
+    M[0, 2] = float(tx)
+    M[1, 2] = float(ty)
+    return M
+
+
+def _hflip_mat(width: int) -> np.ndarray:
+    """x' = (W - 1) - x  (matches previous PIL flip convention)."""
+    M = _eye3()
+    M[0, 0] = -1.0
+    M[0, 2] = float(width - 1)
+    return M
+
+
+def _rotate_mat(angle_deg: float, cx: float, cy: float) -> np.ndarray:
+    """Rotate CCW around (cx, cy); ready for future aug, unused by default."""
+    th = np.deg2rad(float(angle_deg))
+    c, s = np.cos(th), np.sin(th)
+    R = _eye3()
+    R[0, 0], R[0, 1], R[1, 0], R[1, 1] = c, -s, s, c
+    return _translate_mat(cx, cy) @ R @ _translate_mat(-cx, -cy)
+
+
+def _as_2x3(M3: np.ndarray) -> np.ndarray:
+    return np.asarray(M3[:2, :], dtype=np.float64)
+
+
+def _apply_affine_xy(xy: np.ndarray, M_fwd: np.ndarray) -> np.ndarray:
+    """Apply 3x3 forward affine to (..., 2) points."""
+    x = xy[..., 0]
+    y = xy[..., 1]
+    return np.stack(
+        [
+            M_fwd[0, 0] * x + M_fwd[0, 1] * y + M_fwd[0, 2],
+            M_fwd[1, 0] * x + M_fwd[1, 1] * y + M_fwd[1, 2],
+        ],
+        axis=-1,
+    )
+
+
+def _warp_image_mask_kps(
+    image_rgb: np.ndarray,
     mask: np.ndarray,
     kps: np.ndarray,
-    new_w: int,
-    new_h: int,
-) -> Tuple[Image.Image, np.ndarray, np.ndarray]:
-    old_w, old_h = image.size
-    image = image.resize((new_w, new_h), Image.BILINEAR)
-    mask_img = Image.fromarray(mask).resize((new_w, new_h), Image.NEAREST)
-    mask = np.asarray(mask_img, dtype=np.uint8)
-    kps = ensure_kps_xyv(kps)
-    kps = kps.copy()
-    kps[..., 0] *= new_w / float(old_w)
-    kps[..., 1] *= new_h / float(old_h)
-    return image, mask, kps
+    boxes: np.ndarray,
+    M_fwd: np.ndarray,
+    out_w: int,
+    out_h: int,
+    *,
+    do_flip_perm: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """One ``warpAffine`` for image + mask; transform kps/boxes with the same M."""
+    M_inv = _as_2x3(np.linalg.inv(M_fwd))
+    image_out = cv2.warpAffine(
+        image_rgb,
+        M_inv,
+        (out_w, out_h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0),
+    )
+    mask_out = cv2.warpAffine(
+        mask,
+        M_inv,
+        (out_w, out_h),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=_MASK_BG,
+    )
+    kps = ensure_kps_xyv(kps).copy()
+    kps[..., :2] = _apply_affine_xy(kps[..., :2], M_fwd)
+    if do_flip_perm:
+        kps = kps[:, _FLIP_CORNER_PERM]
+    boxes = _transform_boxes_xyxy(boxes, M_fwd)
+    return image_out, mask_out, invalidate_oob_kps(kps, out_w, out_h), boxes
 
 
-def _pad_to_min(
-    image: Image.Image,
-    mask: np.ndarray,
-    kps: np.ndarray,
-    min_w: int,
-    min_h: int,
-    fill: int = 0,
-    mask_fill: int = 255,
-) -> Tuple[Image.Image, np.ndarray, np.ndarray]:
-    w, h = image.size
-    pad_w = max(min_w - w, 0)
-    pad_h = max(min_h - h, 0)
-    if pad_w == 0 and pad_h == 0:
-        return image, mask, kps
-    canvas = Image.new("RGB", (w + pad_w, h + pad_h), (fill, fill, fill))
-    canvas.paste(image, (0, 0))
-    padded = np.full((h + pad_h, w + pad_w), mask_fill, dtype=np.uint8)
-    padded[:h, :w] = mask
-    return canvas, padded, kps
-
-
-def _crop(
-    image: Image.Image,
-    mask: np.ndarray,
-    kps: np.ndarray,
-    left: int,
-    top: int,
-    crop_w: int,
-    crop_h: int,
-) -> Tuple[Image.Image, np.ndarray, np.ndarray]:
-    image = image.crop((left, top, left + crop_w, top + crop_h))
-    mask = np.ascontiguousarray(mask[top : top + crop_h, left : left + crop_w])
-    kps = ensure_kps_xyv(kps)
-    kps = kps.copy()
-    kps[..., 0] -= float(left)
-    kps[..., 1] -= float(top)
-    return image, mask, invalidate_oob_kps(kps, crop_w, crop_h)
-
-
-def _hflip(
-    image: Image.Image,
-    mask: np.ndarray,
-    kps: np.ndarray,
-) -> Tuple[Image.Image, np.ndarray, np.ndarray]:
-    w, h = image.size
-    image = image.transpose(Image.FLIP_LEFT_RIGHT)
-    mask = np.ascontiguousarray(mask[:, ::-1])
-    kps = ensure_kps_xyv(kps)
-    kps = kps.copy()
-    kps[..., 0] = float(w - 1) - kps[..., 0]
-    kps = kps[:, _FLIP_CORNER_PERM]
-    return image, mask, invalidate_oob_kps(kps, w, h)
+def _transform_boxes_xyxy(boxes: np.ndarray, M_fwd: np.ndarray) -> np.ndarray:
+    """Map exclusive xyxy through affine; rebuild axis-aligned AABB."""
+    boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
+    if boxes.size == 0:
+        return boxes.reshape(0, 4)
+    x0, y0, x1, y1 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    # four corners of each box (exclusive edges use x1-eps conceptually; use corners)
+    corners = np.stack(
+        [
+            np.stack([x0, y0], axis=-1),
+            np.stack([x1, y0], axis=-1),
+            np.stack([x1, y1], axis=-1),
+            np.stack([x0, y1], axis=-1),
+        ],
+        axis=1,
+    )  # (N, 4, 2)
+    mapped = _apply_affine_xy(corners, M_fwd)
+    out = np.zeros_like(boxes)
+    out[:, 0] = mapped[:, :, 0].min(axis=1)
+    out[:, 1] = mapped[:, :, 1].min(axis=1)
+    out[:, 2] = mapped[:, :, 0].max(axis=1)
+    out[:, 3] = mapped[:, :, 1].max(axis=1)
+    empty = ~((boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1]))
+    out[empty] = 0.0
+    return out
 
 
 class DetSegKPTransform:
-    """Resize+crop, optional left-right flip, optional color jitter, then filters.
+    """Scale+crop (+ optional hflip) via one affine warp, then color / filters.
 
     Train: keep aspect ratio, scale so the image covers
     ``(img_width, img_height) * Uniform(scale_min, scale_max)``, then random
@@ -134,45 +182,50 @@ class DetSegKPTransform:
             cfg.min_box_area_hm,
             cfg.min_mask_pixels,
         )
-        if train:
-            self.color_jitter = ColorJitter(
+        self.color_jitter = (
+            ColorJitter(
                 brightness=cfg.color_brightness,
                 contrast=cfg.color_contrast,
                 saturation=cfg.color_saturation,
                 hue=cfg.color_hue,
             )
-        else:
-            self.color_jitter = None
-
+            if self.train
+            else None
+        )
     def _scale_factor(self) -> float:
         if not self.train:
             return 1.0
         return random.uniform(self.scale_min, self.scale_max)
 
-    def _resize_and_crop(
-        self,
-        image: Image.Image,
-        mask: np.ndarray,
-        kps: np.ndarray,
-    ) -> Tuple[Image.Image, np.ndarray, np.ndarray]:
-        w, h = image.size
-        cover = max(self.img_w / float(w), self.img_h / float(h))
+    def _sample_geometry(
+        self, src_w: int, src_h: int
+    ) -> Tuple[np.ndarray, bool]:
+        """Build forward affine (src → out) and whether hflip corner-perm is needed."""
+        cover = max(self.img_w / float(src_w), self.img_h / float(src_h))
         factor = cover * self._scale_factor()
-        new_w = max(int(round(w * factor)), 1)
-        new_h = max(int(round(h * factor)), 1)
-        image, mask, kps = _resize(image, mask, kps, new_w, new_h)
-        image, mask, kps = _pad_to_min(image, mask, kps, self.img_w, self.img_h)
+        new_w = max(int(round(src_w * factor)), 1)
+        new_h = max(int(round(src_h * factor)), 1)
+        sx = new_w / float(src_w)
+        sy = new_h / float(src_h)
 
-        w, h = image.size
-        max_left = w - self.img_w
-        max_top = h - self.img_h
+        # Same crop window as old pad-then-crop (pad is implicit border in warp).
+        padded_w = max(new_w, self.img_w)
+        padded_h = max(new_h, self.img_h)
+        max_left = padded_w - self.img_w
+        max_top = padded_h - self.img_h
         if self.train:
             left = random.randint(0, max_left) if max_left > 0 else 0
             top = random.randint(0, max_top) if max_top > 0 else 0
         else:
             left = max_left // 2
             top = max_top // 2
-        return _crop(image, mask, kps, left, top, self.img_w, self.img_h)
+
+        do_flip = self.train and random.random() < self.hflip_prob
+        # src → scaled → crop window → optional hflip
+        M = _translate_mat(-left, -top) @ _scale_mat(sx, sy)
+        if do_flip:
+            M = _hflip_mat(self.img_w) @ M
+        return M, do_flip
 
     def __call__(
         self,
@@ -180,14 +233,35 @@ class DetSegKPTransform:
         mask: np.ndarray,
         kps: np.ndarray,
         labels: np.ndarray,
-    ) -> Tuple[Image.Image, np.ndarray, np.ndarray, np.ndarray]:
-        image, mask, kps = self._resize_and_crop(image, mask, kps)
-        if self.train and random.random() < self.hflip_prob:
-            image, mask, kps = _hflip(image, mask, kps)
+        boxes: np.ndarray,
+    ) -> Tuple[Image.Image, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        image_rgb = np.asarray(image, dtype=np.uint8)
+        mask = np.asarray(mask, dtype=np.uint8)
+        if mask.ndim == 3:
+            mask = mask[..., 0]
+        src_h, src_w = image_rgb.shape[:2]
+        kps = ensure_kps_xyv(kps)
+        boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
+
+        M_fwd, do_flip = self._sample_geometry(src_w, src_h)
+        image_rgb, mask, kps, boxes = _warp_image_mask_kps(
+            image_rgb,
+            mask,
+            kps,
+            boxes,
+            M_fwd,
+            self.img_w,
+            self.img_h,
+            do_flip_perm=do_flip,
+        )
+        image = Image.fromarray(image_rgb)
+
         if self.color_jitter is not None:
             image = self.color_jitter(image)
         labels = np.asarray(labels, dtype=np.int64)
-        mask, kps, labels = self.instance_filters(
-            mask, kps, labels, stride=self.stride
+        mask, kps, labels, boxes = self.instance_filters(
+            mask, kps, labels, boxes, stride=self.stride
         )
-        return image, mask, kps, labels
+        return image, mask, kps, labels, boxes

@@ -855,6 +855,7 @@ def gen_train_sample_from_json(
     Returns a dict with:
       instance_mask: PIL 'P' image (bg=255, instances=0..k-1)
       kps: (k, 8, 3) projected corners as (x, y, v); v=0 valid, v=1 invalid
+      boxes: (k, 4) exclusive xyxy AABB aligned with mask ids / kps rows
       box_indices: (k,) source box index per visible instance
       labels: (n,) class id for every input box
       inst_labels: (k,) class id per visible instance
@@ -874,6 +875,10 @@ def gen_train_sample_from_json(
         K, W, H, boxes, corners_cam=corners_cam,
     )
     inst_labels = labels[box_indices] if box_indices.size else np.zeros(0, dtype=np.int64)
+    mask_arr = np.asarray(instance_mask, dtype=np.uint8)
+    if mask_arr.ndim == 3:
+        mask_arr = mask_arr[..., 0]
+    boxes_xyxy = mask_id_to_boxes_xyxy(mask_arr, int(kps.shape[0]), exclusive=True)
 
     resolved_image = (
         Path(image_path) if image_path is not None
@@ -884,6 +889,7 @@ def gen_train_sample_from_json(
     return {
         "instance_mask": instance_mask,
         "kps": kps,
+        "boxes": boxes_xyxy,
         "box_indices": box_indices,
         "labels": labels,
         "inst_labels": inst_labels,
@@ -933,6 +939,28 @@ def load_train_sample_from_labels(
     inst_labels = np.asarray(train.get("inst_labels", train.get("labels", [])), dtype=np.int64)
     K = np.asarray(train["K"], dtype=np.float64)
     W, H = int(train["W"]), int(train["H"])
+    k = int(kps.shape[0])
+    if inst_labels.shape[0] != k:
+        out = np.zeros((k,), dtype=np.int64)
+        n = min(k, int(inst_labels.shape[0]))
+        out[:n] = inst_labels[:n]
+        inst_labels = out
+    mask_arr = np.asarray(mask, dtype=np.uint8)
+    if mask_arr.ndim == 3:
+        mask_arr = mask_arr[..., 0]
+
+    boxes_xyxy: np.ndarray
+    if train.get("boxes_format") == "xyxy_exclusive" and train.get("boxes") is not None:
+        boxes_xyxy = np.asarray(train["boxes"], dtype=np.float32).reshape(-1, 4)
+    elif train.get("det", {}).get("boxes") is not None:
+        boxes_xyxy = inclusive_int_to_boxes_xyxy(train["det"]["boxes"])
+    elif train.get("boxes") is not None:
+        # Ambiguous legacy top-level; treat as inclusive if matching det, else exclusive.
+        boxes_xyxy = np.asarray(train["boxes"], dtype=np.float32).reshape(-1, 4)
+    else:
+        boxes_xyxy = mask_id_to_boxes_xyxy(mask_arr, k, exclusive=True)
+    if boxes_xyxy.shape[0] != k:
+        boxes_xyxy = mask_id_to_boxes_xyxy(mask_arr, k, exclusive=True)
 
     raw_json = labels_dir / f"{stem}.json"
     frame = load_frame_json(raw_json) if raw_json.is_file() else {}
@@ -944,6 +972,7 @@ def load_train_sample_from_labels(
     return {
         "instance_mask": mask,
         "kps": kps,
+        "boxes": boxes_xyxy,
         "box_indices": box_indices,
         "inst_labels": inst_labels,
         "labels": inst_labels,
@@ -958,19 +987,77 @@ def load_train_sample_from_labels(
     }
 
 
-def mask_id_to_boxes_xyxy(mask: np.ndarray, num_instances: int) -> List[List[int]]:
-    """Inclusive pixel xyxy tight AABB for instance ids ``0 .. k-1``."""
+def mask_id_to_boxes_xyxy(
+    mask: np.ndarray,
+    num_instances: int,
+    *,
+    exclusive: bool = False,
+) -> np.ndarray:
+    """Tight AABB for instance ids ``0 .. k-1`` in one ``O(HW)`` pass.
+
+    Returns ``(k, 4)`` float32 as ``[x0, y0, x1, y1]``.
+    - ``exclusive=False`` (default): inclusive pixel coords (legacy ``det.boxes``).
+    - ``exclusive=True``: half-open ``[x0, x1) x [y0, y1)`` for training filters.
+    Empty instances are ``[0, 0, 0, 0]``.
+    """
     mask = np.asarray(mask)
     if mask.ndim == 3:
         mask = mask[..., 0]
-    boxes: List[List[int]] = []
-    for i in range(int(num_instances)):
-        ys, xs = np.where(mask == i)
-        if xs.size == 0:
-            boxes.append([0, 0, 0, 0])
-            continue
-        boxes.append([int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())])
+    k = int(num_instances)
+    boxes = np.zeros((k, 4), dtype=np.float32)
+    if k <= 0:
+        return boxes
+
+    h, w = mask.shape
+    valid = mask < k
+    if not np.any(valid):
+        return boxes
+
+    ys, xs = np.nonzero(valid)
+    ids = mask[ys, xs].astype(np.int64)
+    x0 = np.full(k, w, dtype=np.int32)
+    y0 = np.full(k, h, dtype=np.int32)
+    x1 = np.full(k, -1, dtype=np.int32)
+    y1 = np.full(k, -1, dtype=np.int32)
+    np.minimum.at(x0, ids, xs.astype(np.int32))
+    np.minimum.at(y0, ids, ys.astype(np.int32))
+    np.maximum.at(x1, ids, xs.astype(np.int32))
+    np.maximum.at(y1, ids, ys.astype(np.int32))
+
+    nonempty = x1 >= 0
+    boxes[nonempty, 0] = x0[nonempty].astype(np.float32)
+    boxes[nonempty, 1] = y0[nonempty].astype(np.float32)
+    if exclusive:
+        boxes[nonempty, 2] = (x1[nonempty] + 1).astype(np.float32)
+        boxes[nonempty, 3] = (y1[nonempty] + 1).astype(np.float32)
+    else:
+        boxes[nonempty, 2] = x1[nonempty].astype(np.float32)
+        boxes[nonempty, 3] = y1[nonempty].astype(np.float32)
     return boxes
+
+
+def boxes_xyxy_to_inclusive_int(boxes: np.ndarray) -> List[List[int]]:
+    """Convert exclusive float xyxy ``(k, 4)`` to inclusive int lists for JSON."""
+    boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
+    out: List[List[int]] = []
+    for b in boxes:
+        x0, y0, x1, y1 = (float(b[0]), float(b[1]), float(b[2]), float(b[3]))
+        if x1 > x0 and y1 > y0:
+            out.append([int(x0), int(y0), int(x1) - 1, int(y1) - 1])
+        else:
+            out.append([0, 0, 0, 0])
+    return out
+
+
+def inclusive_int_to_boxes_xyxy(boxes: Sequence[Sequence[float]]) -> np.ndarray:
+    """Inclusive JSON xyxy → exclusive float32 ``(k, 4)``. Legacy empty is ``[0,0,0,0]``."""
+    arr = np.zeros((len(boxes), 4), dtype=np.float32)
+    for i, b in enumerate(boxes):
+        x0, y0, x1, y1 = (float(b[0]), float(b[1]), float(b[2]), float(b[3]))
+        if x0 == 0.0 and y0 == 0.0 and x1 == 0.0 and y1 == 0.0:
+            continue
+        arr[i] = (x0, y0, x1 + 1.0, y1 + 1.0)
+    return arr
 
 
 def copy_image_as_jpg(
@@ -1016,9 +1103,15 @@ def save_train_sample(
     k = int(kps.shape[0])
     inst_labels = np.asarray(sample["inst_labels"], dtype=np.int64).tolist()
     box_indices = np.asarray(sample["box_indices"], dtype=np.int64).tolist()
-    boxes_xyxy = mask_id_to_boxes_xyxy(mask_arr, k)
+    if sample.get("boxes") is not None:
+        boxes_excl = np.asarray(sample["boxes"], dtype=np.float32).reshape(-1, 4)
+        if boxes_excl.shape[0] != k:
+            boxes_excl = mask_id_to_boxes_xyxy(mask_arr, k, exclusive=True)
+    else:
+        boxes_excl = mask_id_to_boxes_xyxy(mask_arr, k, exclusive=True)
+    boxes_incl = boxes_xyxy_to_inclusive_int(boxes_excl)
     has_seg = k > 0 and bool(np.any(mask_arr != _BG_LABEL))
-    has_det = any((b[2] > b[0]) and (b[3] > b[1]) for b in boxes_xyxy)
+    has_det = bool(np.any((boxes_excl[:, 2] > boxes_excl[:, 0]) & (boxes_excl[:, 3] > boxes_excl[:, 1])))
     has_kp = k > 0
     image_name = Path(sample["image_path"]).name
 
@@ -1034,7 +1127,7 @@ def save_train_sample(
         "has_seg": bool(has_seg),
         "has_kp": bool(has_kp),
         "det": {
-            "boxes": boxes_xyxy,
+            "boxes": boxes_incl,
             "labels": inst_labels,
         },
         "seg": {
@@ -1044,6 +1137,9 @@ def save_train_sample(
             "kps": kps.tolist(),
         },
         "instance_mask": mask_filename,
+        # Aligned with mask ids 0..k-1 and kps[i]: exclusive xyxy float.
+        "boxes": boxes_excl.tolist(),
+        "boxes_format": "xyxy_exclusive",
         "kps": kps.tolist(),
         "inst_labels": inst_labels,
         "box_indices": box_indices,
@@ -1152,9 +1248,11 @@ def _write_viz_grid(saved: Sequence[Path], out_dir: Path) -> Path | None:
 
 
 def _sample_flags_from_mask(mask_arr: np.ndarray, k: int) -> Tuple[bool, bool, bool]:
-    boxes_xyxy = mask_id_to_boxes_xyxy(mask_arr, k)
+    boxes_xyxy = mask_id_to_boxes_xyxy(mask_arr, k, exclusive=True)
     has_seg = k > 0 and bool(np.any(mask_arr != _BG_LABEL))
-    has_det = any((b[2] > b[0]) and (b[3] > b[1]) for b in boxes_xyxy)
+    has_det = bool(
+        np.any((boxes_xyxy[:, 2] > boxes_xyxy[:, 0]) & (boxes_xyxy[:, 3] > boxes_xyxy[:, 1]))
+    )
     has_kp = k > 0
     return bool(has_det), bool(has_seg), bool(has_kp)
 
@@ -1643,16 +1741,33 @@ def overlay_mask_kps_on_bgr(
     if instance_id is not None:
         inst_ids = [instance_id]
 
+    boxes = sample.get("boxes")
+    boxes_arr = None
+    if boxes is not None:
+        boxes_arr = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
+
     for inst_id in inst_ids:
         color = np.array(_VIZ_MASK_COLORS_RGB[inst_id % len(_VIZ_MASK_COLORS_RGB)], dtype=np.float32)
         region = mask == inst_id
         if np.any(region):
             out[region] = out[region] * (1.0 - mask_alpha) + color[::-1] * mask_alpha
-            ys, xs = np.where(region)
-            x0, y0 = int(xs.min()), int(ys.min())
-            x1, y1 = int(xs.max()), int(ys.max())
             bgr_c = (int(color[2]), int(color[1]), int(color[0]))
-            cv2.rectangle(out, (x0, y0), (x1, y1), bgr_c, 2, cv2.LINE_AA)
+            if boxes_arr is not None and 0 <= inst_id < boxes_arr.shape[0]:
+                x0, y0, x1, y1 = boxes_arr[inst_id]
+                # exclusive → inclusive draw
+                cv2.rectangle(
+                    out,
+                    (int(x0), int(y0)),
+                    (max(int(x1) - 1, int(x0)), max(int(y1) - 1, int(y0))),
+                    bgr_c,
+                    2,
+                    cv2.LINE_AA,
+                )
+            else:
+                ys, xs = np.where(region)
+                x0, y0 = int(xs.min()), int(ys.min())
+                x1, y1 = int(xs.max()), int(ys.max())
+                cv2.rectangle(out, (x0, y0), (x1, y1), bgr_c, 2, cv2.LINE_AA)
         for ci in range(8):
             if not kp_corner_valid(kps[inst_id, ci]):
                 continue
