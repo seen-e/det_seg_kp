@@ -1,7 +1,6 @@
 from .dataset import (
     DetSegKPDataset,
     build_dataloader,
-    build_train_dataloader,
     collate_fn,
     instance_mask_to_binary,
     kps_to_heatmap,
@@ -19,7 +18,6 @@ __all__ = [
     "DetSegKPDataset",
     "DetSegKPTransform",
     "build_dataloader",
-    "build_train_dataloader",
     "collate_fn",
     "ensure_kps_xyv",
     "instance_mask_to_binary",

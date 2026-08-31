@@ -334,51 +334,34 @@ def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def build_dataloader(
-    cfg: DataConfig,
-    split: str = "train",
-    batch_size: int = 4,
-    shuffle: Optional[bool] = None,
-    sampler: Optional[torch.utils.data.Sampler] = None,
-    dataset: Optional[DetSegKPDataset] = None,
-) -> DataLoader:
-    if shuffle is None:
-        shuffle = split == "train"
-    if sampler is not None:
-        shuffle = False
-    if dataset is None:
-        dataset = DetSegKPDataset(cfg, split=split)
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        sampler=sampler,
-        num_workers=cfg.num_workers,
-        collate_fn=collate_fn,
-        pin_memory=True,
-        persistent_workers=cfg.num_workers > 0,
-        worker_init_fn=_worker_init_fn if cfg.num_workers > 0 else None,
-        drop_last=split == "train",
-    )
-
-
-def build_train_dataloader(
     cfg: Config,
     split: str,
     batch_size: int,
-    distributed: bool,
+    distributed: bool = False,
     shuffle: Optional[bool] = None,
 ) -> DataLoader:
-    """Build a train/val dataloader with optional DistributedSampler."""
+    """Build train or val ``DataLoader`` (``split`` is ``"train"`` or ``"val"``).
+
+    Defaults: train shuffles and drops last batch; val does neither.
+    Uses ``DistributedSampler`` when ``distributed`` is True.
+    """
     if shuffle is None:
         shuffle = split == "train"
 
     dataset = DetSegKPDataset(cfg.data, split=split)
     sampler = DistributedSampler(dataset, shuffle=shuffle) if distributed else None
-    return build_dataloader(
-        cfg.data,
-        split=split,
+    if sampler is not None:
+        shuffle = False
+
+    return DataLoader(
+        dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         sampler=sampler,
-        dataset=dataset,
+        num_workers=cfg.data.num_workers,
+        collate_fn=collate_fn,
+        pin_memory=True,
+        persistent_workers=cfg.data.num_workers > 0,
+        worker_init_fn=_worker_init_fn if cfg.data.num_workers > 0 else None,
+        drop_last=split == "train",
     )

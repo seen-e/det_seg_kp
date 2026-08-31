@@ -34,7 +34,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from timm.utils import ModelEmaV2
 
 from modules.config import Config
-from datasets import build_train_dataloader
+from datasets import build_dataloader
 from modules.loss import build_criterion
 from modules import DetSegKPModel
 from modules.utils import PRECISION_CHOICES, PrecisionSpec, resolve_precision, set_seed
@@ -298,8 +298,8 @@ def main() -> None:
 
         log_info(rank, f"Distributed: {distributed} | world_size={world_size} | rank={rank} | local_rank={local_rank}")
         log_info(rank, "Building dataloaders...")
-        train_loader = build_train_dataloader(cfg, "train", cfg.train.batch_size, distributed, shuffle=True)
-        val_loader = build_train_dataloader(cfg, "val", cfg.train.batch_size, distributed, shuffle=False)
+        train_loader = build_dataloader(cfg, "train", cfg.train.batch_size, distributed)
+        val_loader = build_dataloader(cfg, "val", cfg.train.batch_size, distributed)
         log_info(
             rank,
             f"data_root={cfg.data.data_root} "
