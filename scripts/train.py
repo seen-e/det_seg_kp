@@ -180,6 +180,10 @@ def main() -> None:
         cfg.train.lr_backbone = base_lr_backbone * lr_scale
 
         device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
+        if device.type == "cuda":
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
         precision = resolve_precision(cfg.train.precision, device)
         scaler = precision.build_scaler()
 

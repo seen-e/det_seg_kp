@@ -392,15 +392,18 @@ def build_dataloader(
     if sampler is not None:
         shuffle = False
 
-    return DataLoader(
-        dataset,
+    loader_kwargs = dict(
+        dataset=dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         sampler=sampler,
         num_workers=cfg.data.num_workers,
         collate_fn=collate_fn,
         pin_memory=True,
-        persistent_workers=cfg.data.num_workers > 0,
-        worker_init_fn=_worker_init_fn if cfg.data.num_workers > 0 else None,
         drop_last=split == "train",
     )
+    if cfg.data.num_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = max(2, int(cfg.data.prefetch_factor))
+        loader_kwargs["worker_init_fn"] = _worker_init_fn
+    return DataLoader(**loader_kwargs)

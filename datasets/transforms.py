@@ -93,6 +93,18 @@ def _apply_affine_xy(xy: np.ndarray, M_fwd: np.ndarray) -> np.ndarray:
     )
 
 
+def _clip_boxes_xyxy(boxes: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Clip exclusive xyxy to ``[0, W] x [0, H]``; zero out empty boxes."""
+    boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4).copy()
+    boxes[:, 0] = np.clip(boxes[:, 0], 0.0, float(width))
+    boxes[:, 2] = np.clip(boxes[:, 2], 0.0, float(width))
+    boxes[:, 1] = np.clip(boxes[:, 1], 0.0, float(height))
+    boxes[:, 3] = np.clip(boxes[:, 3], 0.0, float(height))
+    empty = ~((boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1]))
+    boxes[empty] = 0.0
+    return boxes
+
+
 def _warp_image_mask_kps(
     image_rgb: np.ndarray,
     mask: np.ndarray,
@@ -104,37 +116,41 @@ def _warp_image_mask_kps(
     *,
     do_flip_perm: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """One ``warpAffine`` for image + mask; transform kps/boxes with the same M."""
-    M_inv = _as_2x3(np.linalg.inv(M_fwd))
+    """One ``warpAffine`` for image + mask; transform kps/boxes with the same M.
+
+    ``M_fwd`` maps source → output. OpenCV ``warpAffine`` (without
+    ``WARP_INVERSE_MAP``) treats ``M`` as that forward map and inverts it
+    internally for sampling — pass ``M_fwd``, not ``inv(M_fwd)``.
+    """
+    M_2x3 = _as_2x3(M_fwd)
     image_out = cv2.warpAffine(
-        image_rgb,
-        M_inv,
+        np.ascontiguousarray(image_rgb),
+        M_2x3,
         (out_w, out_h),
         flags=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=(0, 0, 0),
     )
     mask_out = cv2.warpAffine(
-        mask,
-        M_inv,
+        np.ascontiguousarray(mask),
+        M_2x3,
         (out_w, out_h),
         flags=cv2.INTER_NEAREST,
         borderMode=cv2.BORDER_CONSTANT,
-        borderValue=_MASK_BG,
+        borderValue=int(_MASK_BG),
     )
     kps = ensure_kps_xyv(kps).copy()
     kps[..., :2] = _apply_affine_xy(kps[..., :2], M_fwd)
     if do_flip_perm:
         kps = kps[:, _FLIP_CORNER_PERM]
-    boxes = _transform_boxes_xyxy(boxes, M_fwd)
-    return image_out, mask_out, invalidate_oob_kps(kps, out_w, out_h), boxes
+    kps = invalidate_oob_kps(kps, out_w, out_h)
+    boxes_out = _clip_boxes_xyxy(_transform_boxes_xyxy(boxes, M_fwd), out_w, out_h)
+    return image_out, mask_out, kps, boxes_out
 
 
 def _transform_boxes_xyxy(boxes: np.ndarray, M_fwd: np.ndarray) -> np.ndarray:
     """Map exclusive xyxy through affine; rebuild axis-aligned AABB."""
     boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
-    if boxes.size == 0:
-        return boxes.reshape(0, 4)
     x0, y0, x1, y1 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
     # four corners of each box (exclusive edges use x1-eps conceptually; use corners)
     corners = np.stack(

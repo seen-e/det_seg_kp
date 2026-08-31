@@ -57,6 +57,7 @@ TRAIN_ARGS=(
   --opt "data.img_height=${IMG_HEIGHT:-768}"
   --opt "data.stride=${STRIDE:-4}"
   --opt "data.num_workers=${NUM_WORKERS:-8}"
+  --opt "data.prefetch_factor=${PREFETCH_FACTOR:-2}"
   --opt "model.object_query_decoder.num_queries=${NUM_QUERIES:-100}"
   --opt "train.log_interval=${LOG_INTERVAL:-10}"
   --opt "train.vis_interval=${VIS_INTERVAL:-100}"

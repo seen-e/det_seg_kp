@@ -109,6 +109,7 @@ class DataConfig:
     img_height: int = 768
     stride: int = 4
     num_workers: int = 8
+    prefetch_factor: int = 2
     num_kps: int = 8
     kp_sigma: float = 2.0
     val_ratio: float = 0.2
