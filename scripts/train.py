@@ -7,16 +7,23 @@ Single GPU:
 Multi-GPU / multi-node (torchrun):
   torchrun --standalone --nproc_per_node=8 scripts/train.py --batch-size 4
 
+LR and backbone LR are scaled by ``sqrt(total_batch_size / 4)`` where
+``total_batch_size = batch_size * world_size`` (reference batch size is 4).
+
 Other config fields use :class:`modules.config.Config` defaults, or override via ``--opt``:
   python scripts/train.py --opt train.val_interval=1000 --opt data.img_width=960
 """
 from __future__ import annotations
 
+import math
 import os
 import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+# LR is scaled by sqrt(total_batch_size / LR_REF_BATCH_SIZE).
+LR_REF_BATCH_SIZE = 4
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -166,6 +173,12 @@ def main() -> None:
         cfg = config_from_args(args)
         set_seed(cfg.train.seed + rank)
 
+        total_batch_size = cfg.train.batch_size * world_size
+        lr_scale = math.sqrt(total_batch_size / float(LR_REF_BATCH_SIZE))
+        base_lr, base_lr_backbone = cfg.train.lr, cfg.train.lr_backbone
+        cfg.train.lr = base_lr * lr_scale
+        cfg.train.lr_backbone = base_lr_backbone * lr_scale
+
         device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
         precision = resolve_precision(cfg.train.precision, device)
         scaler = precision.build_scaler()
@@ -241,7 +254,13 @@ def main() -> None:
 
         num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         log_info(rank, f"Model parameters: {num_params / 1e6:.2f}M")
-        log_info(rank, f"Global batch size: {cfg.train.batch_size * world_size}")
+        log_info(rank, f"Global batch size: {total_batch_size}")
+        log_info(
+            rank,
+            f"LR scale=sqrt({total_batch_size}/{LR_REF_BATCH_SIZE})={lr_scale:g} "
+            f"(base_lr={base_lr:g} -> {cfg.train.lr:g}, "
+            f"base_backbone_lr={base_lr_backbone:g} -> {cfg.train.lr_backbone:g})",
+        )
         log_info(
             rank,
             f"LR={cfg.train.lr} backbone_lr={cfg.train.lr_backbone} "

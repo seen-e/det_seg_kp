@@ -80,7 +80,8 @@ def init_wandb(cfg: Config, world_size: int, wandb_tags: Optional[list] = None) 
             "batch_size_per_gpu": cfg.train.batch_size,
             "world_size": world_size,
             "global_batch_size": cfg.train.batch_size * world_size,
-            "lr": cfg.train.lr,
+            "lr": cfg.train.lr,  # already sqrt(global_batch/4)-scaled in train.py
+            "lr_backbone": cfg.train.lr_backbone,
             "precision": cfg.train.precision,
             "img_width": cfg.data.img_width,
             "img_height": cfg.data.img_height,

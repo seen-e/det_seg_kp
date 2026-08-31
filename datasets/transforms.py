@@ -1,6 +1,7 @@
 """Geometric and photometric augmentation for image / instance-mask / kps.
 
 All geometric ops keep the three aligned. Color jitter is image-only.
+Instance filters run after geometry (and labels stay in sync).
 
 Box corner order (from gen_train_sample): bottom 0-3 CCW, top 4-7 CCW,
 local +X = width. Horizontal flip swaps left/right corners:
@@ -17,6 +18,8 @@ from torchvision.transforms import ColorJitter
 
 from modules.config import DataConfig
 from scripts.gen_train_sample import _KP_INVALID, ensure_kps_xyv
+
+from .filter import ComposeInstanceFilters, build_instance_filters
 
 # After a left-right flip, remap corner indices so semantic identity is kept.
 _FLIP_CORNER_PERM = np.array([1, 0, 3, 2, 5, 4, 7, 6], dtype=np.int64)
@@ -46,10 +49,9 @@ def _resize(
     mask_img = Image.fromarray(mask).resize((new_w, new_h), Image.NEAREST)
     mask = np.asarray(mask_img, dtype=np.uint8)
     kps = ensure_kps_xyv(kps)
-    if kps.size:
-        kps = kps.copy()
-        kps[..., 0] *= new_w / float(old_w)
-        kps[..., 1] *= new_h / float(old_h)
+    kps = kps.copy()
+    kps[..., 0] *= new_w / float(old_w)
+    kps[..., 1] *= new_h / float(old_h)
     return image, mask, kps
 
 
@@ -86,10 +88,9 @@ def _crop(
     image = image.crop((left, top, left + crop_w, top + crop_h))
     mask = np.ascontiguousarray(mask[top : top + crop_h, left : left + crop_w])
     kps = ensure_kps_xyv(kps)
-    if kps.size:
-        kps = kps.copy()
-        kps[..., 0] -= float(left)
-        kps[..., 1] -= float(top)
+    kps = kps.copy()
+    kps[..., 0] -= float(left)
+    kps[..., 1] -= float(top)
     return image, mask, invalidate_oob_kps(kps, crop_w, crop_h)
 
 
@@ -102,31 +103,37 @@ def _hflip(
     image = image.transpose(Image.FLIP_LEFT_RIGHT)
     mask = np.ascontiguousarray(mask[:, ::-1])
     kps = ensure_kps_xyv(kps)
-    if kps.size:
-        kps = kps.copy()
-        kps[..., 0] = float(w - 1) - kps[..., 0]
-        kps = kps[:, _FLIP_CORNER_PERM]
+    kps = kps.copy()
+    kps[..., 0] = float(w - 1) - kps[..., 0]
+    kps = kps[:, _FLIP_CORNER_PERM]
     return image, mask, invalidate_oob_kps(kps, w, h)
 
 
 class DetSegKPTransform:
-    """Resize+crop, optional left-right flip, optional color jitter.
+    """Resize+crop, optional left-right flip, optional color jitter, then filters.
 
     Train: keep aspect ratio, scale so the image covers
     ``(img_width, img_height) * Uniform(scale_min, scale_max)``, then random
-    crop to ``img_width x img_height``, flip, ColorJitter.
+    crop to ``img_width x img_height``, flip, ColorJitter, instance filters.
 
-    Val / no-aug: scale to cover the canvas, center crop, no flip / color.
+    Val / no-aug: scale to cover the canvas, center crop, no flip / color;
+    same instance filters as train.
     Native 1920x1536 → 960x768 is an exact 2x downsample (no crop leftover).
     """
 
     def __init__(self, cfg: DataConfig, train: bool = True):
         self.img_w = int(cfg.img_width)
         self.img_h = int(cfg.img_height)
+        self.stride = int(cfg.stride)
         self.train = bool(train)
         self.hflip_prob = float(cfg.hflip_prob) if train else 0.0
         self.scale_min = float(cfg.scale_min)
         self.scale_max = float(cfg.scale_max)
+        self.instance_filters: ComposeInstanceFilters = build_instance_filters(
+            cfg.min_box_side_hm,
+            cfg.min_box_area_hm,
+            cfg.min_mask_pixels,
+        )
         if train:
             self.color_jitter = ColorJitter(
                 brightness=cfg.color_brightness,
@@ -172,10 +179,15 @@ class DetSegKPTransform:
         image: Image.Image,
         mask: np.ndarray,
         kps: np.ndarray,
-    ) -> Tuple[Image.Image, np.ndarray, np.ndarray]:
+        labels: np.ndarray,
+    ) -> Tuple[Image.Image, np.ndarray, np.ndarray, np.ndarray]:
         image, mask, kps = self._resize_and_crop(image, mask, kps)
         if self.train and random.random() < self.hflip_prob:
             image, mask, kps = _hflip(image, mask, kps)
         if self.color_jitter is not None:
             image = self.color_jitter(image)
-        return image, mask, kps
+        labels = np.asarray(labels, dtype=np.int64)
+        mask, kps, labels = self.instance_filters(
+            mask, kps, labels, stride=self.stride
+        )
+        return image, mask, kps, labels

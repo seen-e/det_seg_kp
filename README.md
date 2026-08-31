@@ -76,12 +76,13 @@ export TORCH_EXTENSIONS_DIR=/tmp/torch_extensions   # 可选
 
 ## 4. 数据
 
-`DATA_ROOT`（默认 `./data`）下每个样本一个 stem：
+`DATA_ROOT`（默认见 `do_train.sh`）下由 `gen_and_save_from_tree` 生成：
 
 ```text
-{data_root}/images/{stem}.png
-{data_root}/labels/{stem}_instance_mask.png   # 实例 id，背景常为 255
-{data_root}/labels/{stem}_train.json          # kps (N,8,3)、labels 等
+{data_root}/index.json
+{data_root}/{rel_dir}/{stem}.jpg
+{data_root}/{rel_dir}/{stem}_instance_mask.png
+{data_root}/{rel_dir}/{stem}_train.json
 ```
 
 可用 `scripts/gen_train_sample.py` 生成样本。默认 `val_ratio=0.2` 划分 train/val。

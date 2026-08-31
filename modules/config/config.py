@@ -80,11 +80,12 @@ class ModelConfig:
 class DataConfig:
     """On-disk samples and training-time targets.
 
-    Layout under ``data_root`` (one sample = one stem, e.g. ``frame_0001``)::
+    Layout under ``data_root`` (from ``gen_and_save_from_tree``)::
 
-        {data_root}/images/{stem}.png
-        {data_root}/labels/{stem}_instance_mask.png
-        {data_root}/labels/{stem}_train.json
+        {data_root}/index.json
+        {data_root}/{rel_dir}/{stem}.jpg
+        {data_root}/{rel_dir}/{stem}_instance_mask.png
+        {data_root}/{rel_dir}/{stem}_train.json
 
     Model input is ``img_width x img_height`` (default 960 x 768). ``stride``
     sets mask / keypoint-heatmap size to ``(H/stride) x (W/stride)``. Default
@@ -94,6 +95,13 @@ class DataConfig:
 
     ``kp_sigma`` is the Gaussian width in *heatmap* pixels, not input-image
     pixels (e.g. 2.0 at stride=4 is 8 pixels on the input image).
+
+    Instance filters (applied after geometric transforms; 0 disables each)::
+
+        min_box_side_hm / min_box_area_hm are in *heatmap* space and scaled by
+        ``stride`` / ``stride**2`` to input pixels (larger stride → stricter).
+        At stride=4, defaults match short side >= 32 and area >= 32**2.
+        ``min_mask_pixels`` counts foreground on the stride-downsampled id-mask.
     """
 
     data_root: str = "./data"
@@ -105,6 +113,11 @@ class DataConfig:
     kp_sigma: float = 2.0
     val_ratio: float = 0.2
     split_seed: int = 42
+
+    # instance size filters (heatmap-space side/area; 0 disables)
+    min_box_side_hm: float = 8.0
+    min_box_area_hm: float = 64.0
+    min_mask_pixels: int = 16
 
     # geometric augmentation (train only)
     hflip_prob: float = 0.5
@@ -128,11 +141,12 @@ class TrainConfig:
 
     batch_size: int = 4
     epochs: int = 50000
+    # Base LRs; train.py multiplies both by sqrt(total_batch_size / 4).
     lr: float = 1e-4
     weight_decay: float = 1e-4
     lr_backbone: float = 1e-5  # typically 0.1 * lr
     warmup_epochs_ratio: float = 0.1  # first ratio of epochs; 0 disables (overridden by CLI)
-    lr_min_ratio: float = 0.01  # cosine floor = lr * lr_min_ratio
+    lr_min_ratio: float = 0.01  # cosine floor = (scaled lr) * lr_min_ratio
     clip_max_norm: float = 0.1
     # fp32 | fp16 (AMP + GradScaler) | bf16 (AMP, no scaler) | amp (bf16 if supported else fp16)
     precision: str = "bf16"

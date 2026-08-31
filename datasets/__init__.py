@@ -6,6 +6,13 @@ from .dataset import (
     kps_to_heatmap,
     kps_to_heatmaps,
 )
+from .filter import (
+    ComposeInstanceFilters,
+    MinBoxAreaFilter,
+    MinBoxSideFilter,
+    MinMaskPixelsFilter,
+    build_instance_filters,
+)
 from .transforms import DetSegKPTransform
 
 from scripts.gen_train_sample import (
@@ -15,9 +22,14 @@ from scripts.gen_train_sample import (
 )
 
 __all__ = [
+    "ComposeInstanceFilters",
     "DetSegKPDataset",
     "DetSegKPTransform",
+    "MinBoxAreaFilter",
+    "MinBoxSideFilter",
+    "MinMaskPixelsFilter",
     "build_dataloader",
+    "build_instance_filters",
     "collate_fn",
     "ensure_kps_xyv",
     "instance_mask_to_binary",

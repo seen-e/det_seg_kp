@@ -1,10 +1,11 @@
 """Dataset and dataloader for det + seg + keypoint.
 
-Each on-disk sample (stem e.g. ``frame_0001``)::
+On-disk layout from ``gen_and_save_from_tree``::
 
-    {data_root}/images/{stem}.png
-    {data_root}/labels/{stem}_instance_mask.png
-    {data_root}/labels/{stem}_train.json
+    {data_root}/index.json
+    {data_root}/{rel_dir}/{stem}.jpg
+    {data_root}/{rel_dir}/{stem}_instance_mask.png
+    {data_root}/{rel_dir}/{stem}_train.json
 
 ``__getitem__`` returns training tensors after resize+crop / flip / color jitter:
   - image:   (3, H, W) RGB in [0, 1], W=img_width, H=img_height (default 960x768)
@@ -30,7 +31,6 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from .transforms import DetSegKPTransform
 from modules.config import Config, DataConfig
 from scripts.gen_train_sample import (
-    TRAIN_LABEL_SUFFIX,
     ensure_kps_xyv,
     kp_corner_valid,
     kp_xy,
@@ -39,14 +39,27 @@ from scripts.gen_train_sample import (
 from modules.utils import gaussian_heatmap
 
 
+def _sample_id(rel_dir: str, stem: str) -> str:
+    rel_dir = (rel_dir or "").strip().strip("/\\")
+    return f"{rel_dir}/{stem}" if rel_dir else stem
+
+
+def _entries_from_index(payload: Any) -> List[Dict[str, Any]]:
+    if isinstance(payload, list):
+        return [e for e in payload if isinstance(e, dict) and "stem" in e]
+    if isinstance(payload, dict):
+        samples = payload.get("samples", [])
+        if isinstance(samples, list):
+            return [e for e in samples if isinstance(e, dict) and "stem" in e]
+    return []
+
+
 def instance_mask_to_binary(mask: np.ndarray, num_instances: int) -> np.ndarray:
     """
     Convert an id map (H, W) with labels 0..k-1 / bg=255 into (k, H, W) float32
     binary masks used by the mask / dice losses.
     """
     h, w = mask.shape
-    if num_instances <= 0:
-        return np.zeros((0, h, w), dtype=np.float32)
     binary = np.zeros((num_instances, h, w), dtype=np.float32)
     for i in range(num_instances):
         binary[i] = (mask == i).astype(np.float32)
@@ -58,6 +71,7 @@ def kps_to_heatmap(
     height: int,
     width: int,
     sigma: float = 2.0,
+    heatmap: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Draw up to 8 corners onto a single heatmap.
@@ -68,7 +82,7 @@ def kps_to_heatmap(
     Returns:
         heatmap: (H, W) float32 in [0, 1]
     """
-    heatmap = np.zeros((height, width), dtype=np.float32)
+    heatmap = np.zeros((height, width), dtype=np.float32) if heatmap is None else heatmap
     kps = np.asarray(kps, dtype=np.float32)
     if kps.ndim == 1:
         kps = rearrange(kps, "c -> 1 c")
@@ -89,16 +103,10 @@ def kps_to_heatmaps(
 ) -> np.ndarray:
     """(k, 8, 3) -> (k, H, W); one fused heatmap per instance."""
     kps = np.asarray(kps, dtype=np.float32)
-    if kps.size == 0:
-        return np.zeros((0, height, width), dtype=np.float32)
-    if kps.ndim == 2:
-        kps = rearrange(kps, "(k n) c -> k n c", n=8)
-    else:
-        kps = rearrange(kps, "k n c -> k n c", n=8)
-    return np.stack(
-        [kps_to_heatmap(kps[i], height, width, sigma=sigma) for i in range(kps.shape[0])],
-        axis=0,
-    )
+    out = np.zeros((kps.shape[0], height, width), dtype=np.float32)
+    for i in range(kps.shape[0]):
+        kps_to_heatmap(kps[i], height, width, sigma=sigma, heatmap=out[i])
+    return out
 
 
 def masks_to_boxes_cxcywh(masks: np.ndarray) -> np.ndarray:
@@ -133,20 +141,30 @@ def downsample_id_mask(mask: np.ndarray, stride: int) -> np.ndarray:
     )
 
 
-def discover_stems(data_root: Path) -> List[str]:
-    """List sample stems from ``labels/index.json`` or ``*_train.json`` files."""
-    labels_dir = data_root / "labels"
-    index_path = labels_dir / "index.json"
-    if index_path.is_file():
-        with index_path.open(encoding="utf-8") as f:
-            payload = json.load(f)
-        samples = payload.get("samples", payload if isinstance(payload, list) else [])
-        stems = [str(e["stem"]) for e in samples]
-        if stems:
-            return stems
-    paths = sorted(labels_dir.glob(f"*{TRAIN_LABEL_SUFFIX}.json"))
-    suffix = f"{TRAIN_LABEL_SUFFIX}.json"
-    return [p.name[: -len(suffix)] for p in paths]
+def discover_samples(data_root: Path) -> List[Dict[str, Any]]:
+    """Load samples from ``{data_root}/index.json`` (``stem`` + ``rel_dir``).
+
+    Each entry: ``id``, ``stem``, ``sample_dir`` (dir with jpg / mask / ``*_train.json``).
+    """
+    data_root = Path(data_root)
+    index_path = data_root / "index.json"
+    if not index_path.is_file():
+        return []
+    with index_path.open(encoding="utf-8") as f:
+        entries = _entries_from_index(json.load(f))
+    out: List[Dict[str, Any]] = []
+    for e in entries:
+        stem = str(e["stem"])
+        rel_dir = str(e.get("rel_dir") or "")
+        sample_dir = data_root / rel_dir if rel_dir else data_root
+        out.append(
+            {
+                "id": _sample_id(rel_dir, stem),
+                "stem": stem,
+                "sample_dir": sample_dir,
+            }
+        )
+    return out
 
 
 def split_stems(
@@ -170,6 +188,18 @@ def split_stems(
     if split == "val":
         return [s for s in stems if s in val]
     return [s for s in stems if s not in val]
+
+
+def split_samples(
+    samples: Sequence[Dict[str, Any]],
+    split: str,
+    val_ratio: float,
+    seed: int,
+) -> List[Dict[str, Any]]:
+    """Train/val split over sample records using stable ``id`` keys."""
+    ids = [s["id"] for s in samples]
+    keep = set(split_stems(ids, split, val_ratio, seed))
+    return [s for s in samples if s["id"] in keep]
 
 
 def _worker_init_fn(worker_id: int) -> None:
@@ -217,19 +247,18 @@ class DetSegKPDataset(Dataset):
         self.out_h = self.img_h // self.stride
 
         self.data_root = Path(self.cfg.data_root)
-        self.images_dir = self.data_root / "images"
-        self.labels_dir = self.data_root / "labels"
-        stems = discover_stems(self.data_root)
-        if not stems:
+        samples = discover_samples(self.data_root)
+        if not samples:
             raise FileNotFoundError(
-                f"No training samples under {self.labels_dir} "
-                f"(expected *{TRAIN_LABEL_SUFFIX}.json or index.json)"
+                f"No training samples under {self.data_root} "
+                f"(expected {self.data_root / 'index.json'} with samples[].stem/rel_dir)"
             )
-        self.stems = split_stems(
-            stems, split, self.cfg.val_ratio, self.cfg.split_seed
+        self.samples = split_samples(
+            samples, split, self.cfg.val_ratio, self.cfg.split_seed
         )
-        if not self.stems:
+        if not self.samples:
             raise RuntimeError(f"split={split!r} is empty (val_ratio={self.cfg.val_ratio})")
+        self.stems = [s["id"] for s in self.samples]
 
         if augment is None:
             augment = split == "train"
@@ -237,13 +266,14 @@ class DetSegKPDataset(Dataset):
         self.transform = DetSegKPTransform(self.cfg, train=self.augment)
 
     def __len__(self) -> int:
-        return len(self.stems)
+        return len(self.samples)
 
-    def _load_raw(self, stem: str) -> Dict[str, Any]:
+    def _load_raw(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        sample_dir = Path(entry["sample_dir"])
         sample = load_train_sample_from_labels(
-            stem,
-            self.labels_dir,
-            images_dir=self.images_dir,
+            entry["stem"],
+            sample_dir,
+            images_dir=sample_dir,
         )
         image_path = Path(sample["image_path"])
         if not image_path.is_file():
@@ -261,13 +291,20 @@ class DetSegKPDataset(Dataset):
             out = np.zeros((n,), dtype=np.int64)
             out[: min(n, labels.shape[0])] = labels[: min(n, labels.shape[0])]
             labels = out
-        return {"image": image, "mask": mask, "kps": kps, "labels": labels, "stem": stem}
+        return {
+            "image": image,
+            "mask": mask,
+            "kps": kps,
+            "labels": labels,
+            "stem": entry["id"],
+        }
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        stem = self.stems[idx]
-        raw = self._load_raw(stem)
-        image, mask, kps = self.transform(raw["image"], raw["mask"], raw["kps"])
-        labels = raw["labels"]
+        entry = self.samples[idx]
+        raw = self._load_raw(entry)
+        image, mask, kps, labels = self.transform(
+            raw["image"], raw["mask"], raw["kps"], raw["labels"]
+        )
 
         rgb = np.asarray(image, dtype=np.float32) / 255.0
         h, w = mask.shape
@@ -275,30 +312,23 @@ class DetSegKPDataset(Dataset):
         num_inst = int(kps.shape[0]) if kps.size else 0
 
         binary_full = instance_mask_to_binary(mask, num_inst)
-        boxes = masks_to_boxes_cxcywh(binary_full) if num_inst else np.zeros((0, 4), dtype=np.float32)
+        boxes = masks_to_boxes_cxcywh(binary_full)
 
         mask_ds = downsample_id_mask(mask, self.stride)
         binary = instance_mask_to_binary(mask_ds, num_inst)
 
-        if num_inst:
-            keep = rearrange(binary, "n h w -> n (h w)").sum(axis=1) > 0
-            binary = binary[keep]
-            boxes = boxes[keep]
-            kps = kps[keep]
-            labels = labels[keep]
-            num_inst = int(keep.sum())
+        # Drop instances that vanished after nearest downsample (filters already
+        # ran at full res; this is a cheap heatmap-empty safety net).
+        keep = rearrange(binary, "n h w -> n (h w)").sum(axis=1) > 0
+        binary = binary[keep]
+        boxes = boxes[keep]
+        kps = kps[keep]
+        labels = labels[keep]
 
-        if num_inst == 0:
-            kps = np.zeros((0, 8, 3), dtype=np.float32)
-            labels = np.zeros((0,), dtype=np.int64)
-            boxes = np.zeros((0, 4), dtype=np.float32)
-            binary = np.zeros((0, hs, ws), dtype=np.float32)
-            kp_maps = np.zeros((0, hs, ws), dtype=np.float32)
-        else:
-            kps_hm = kps.copy()
-            kps_hm[..., 0] /= float(self.stride)
-            kps_hm[..., 1] /= float(self.stride)
-            kp_maps = kps_to_heatmaps(kps_hm, hs, ws, sigma=self.kp_sigma)
+        kps_hm = kps.copy()
+        kps_hm[..., 0] /= float(self.stride)
+        kps_hm[..., 1] /= float(self.stride)
+        kp_maps = kps_to_heatmaps(kps_hm, hs, ws, sigma=self.kp_sigma)
 
         image_t = rearrange(torch.from_numpy(rgb.copy()), "h w c -> c h w")
         return {
@@ -307,10 +337,8 @@ class DetSegKPDataset(Dataset):
             "kp_maps": torch.from_numpy(np.ascontiguousarray(kp_maps)),
             "labels": torch.from_numpy(np.ascontiguousarray(labels)),
             "boxes": torch.from_numpy(np.ascontiguousarray(boxes)),
-            "kps": torch.from_numpy(
-                np.ascontiguousarray(rearrange(kps, "n eight three -> n eight three", eight=8, three=3))
-            ),
-            "stem": stem,
+            "kps": torch.from_numpy(np.ascontiguousarray(kps)),
+            "stem": entry["id"],
         }
 
 

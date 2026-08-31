@@ -10,29 +10,45 @@ import torch.nn.functional as F
 from einops import rearrange
 from PIL import Image, ImageDraw, ImageFont
 
-_GT_COLORS = np.array(
-    [
-        [230, 25, 75],
-        [60, 180, 75],
-        [67, 99, 216],
-        [245, 130, 48],
-        [145, 30, 180],
-        [70, 240, 240],
-        [240, 50, 230],
-        [188, 246, 12],
-        [250, 190, 190],
-        [0, 128, 128],
-        [230, 190, 255],
-        [154, 99, 36],
-        [255, 250, 200],
-        [128, 0, 0],
-        [170, 255, 195],
-    ],
-    dtype=np.float32,
-)
-
 _TITLE_H = 18
 _PANEL_TITLES = ("RGB", "GT-Det", "GT-Seg", "GT-KPS", "Pred-Det", "Pred-Seg", "Pred-KPS")
+# Golden-ratio conjugate: successive hues stay far apart on the circle.
+_GOLDEN_RATIO_CONJUGATE = 0.618033988749895
+
+
+def _hsv_to_rgb(h: float, s: float, v: float) -> np.ndarray:
+    """HSV in [0, 1] -> RGB float32 in [0, 1]."""
+    i = int(h * 6.0) % 6
+    f = h * 6.0 - int(h * 6.0)
+    p = v * (1.0 - s)
+    q = v * (1.0 - f * s)
+    t = v * (1.0 - (1.0 - f) * s)
+    if i == 0:
+        r, g, b = v, t, p
+    elif i == 1:
+        r, g, b = q, v, p
+    elif i == 2:
+        r, g, b = p, v, t
+    elif i == 3:
+        r, g, b = p, q, v
+    elif i == 4:
+        r, g, b = t, p, v
+    else:
+        r, g, b = v, p, q
+    return np.array([r, g, b], dtype=np.float32)
+
+
+def _id_to_color(idx: int, *, sat: float = 0.72, val: float = 0.95) -> np.ndarray:
+    """Map instance id -> distinct RGB via golden-ratio hue walk."""
+    hue = (float(idx) * _GOLDEN_RATIO_CONJUGATE) % 1.0
+    return _hsv_to_rgb(hue, sat, val)
+
+
+def _gt_colors(n: int) -> np.ndarray:
+    """(n, 3) float RGB in [0, 1]; unlimited distinct-ish colors by id."""
+    if n <= 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    return np.stack([_id_to_color(i) for i in range(n)], axis=0)
 
 
 def _to_numpy_image(image: torch.Tensor) -> np.ndarray:
@@ -46,13 +62,6 @@ def _to_numpy_image(image: torch.Tensor) -> np.ndarray:
 def _resize_rgb(rgb: np.ndarray, height: int, width: int) -> np.ndarray:
     img = Image.fromarray(rgb, mode="RGB")
     return np.asarray(img.resize((width, height), Image.BILINEAR), dtype=np.uint8)
-
-
-def _gt_colors(n: int) -> np.ndarray:
-    if n <= 0:
-        return np.zeros((0, 3), dtype=np.float32)
-    reps = int(np.ceil(n / len(_GT_COLORS)))
-    return np.tile(_GT_COLORS, (reps, 1))[:n] / 255.0
 
 
 def _as_hw_masks(t: torch.Tensor, height: int, width: int) -> np.ndarray:
