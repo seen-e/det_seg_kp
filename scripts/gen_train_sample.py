@@ -41,19 +41,23 @@ INSTANCE_MASK_SUFFIX = "_instance_mask"
 
 
 def is_raw_label_json(path: Union[str, Path]) -> bool:
-    """True for capture JSON, excluding generated ``*_train.json`` files."""
+    """True for capture JSON, excluding generated ``*_train.json`` / ``index.json``."""
     path = Path(path)
-    return path.suffix == ".json" and not path.stem.endswith(TRAIN_LABEL_SUFFIX)
+    if path.suffix != ".json" or path.stem.endswith(TRAIN_LABEL_SUFFIX):
+        return False
+    return path.name != "index.json"
 
 
 def list_raw_label_jsons(
     labels_dir: Union[str, Path],
     pattern: str = "frame_*.json",
+    *,
+    recursive: bool = False,
 ) -> List[Path]:
     """List original annotation JSON files under ``labels_dir``."""
-    return sorted(
-        p for p in Path(labels_dir).glob(pattern) if is_raw_label_json(p)
-    )
+    root = Path(labels_dir)
+    iterator = root.rglob(pattern) if recursive else root.glob(pattern)
+    return sorted(p for p in iterator if is_raw_label_json(p))
 
 
 def train_label_path(stem: str, labels_dir: Union[str, Path] = DEFAULT_LABELS_DIR) -> Path:
@@ -204,7 +208,7 @@ def _render_instance_mask_cpu(
     H: int,
     bg_label: int = 255,
 ) -> np.ndarray:
-    """Software z-buffer rasterizer (no OpenGL)."""
+    """Vectorized software z-buffer rasterizer (no OpenGL)."""
     n = corners_cam.shape[0]
     mask_buf = np.full((H, W), bg_label, dtype=np.uint8)
     depth_buf = np.full((H, W), np.inf, dtype=np.float64)
@@ -244,20 +248,22 @@ def _render_instance_mask_cpu(
         if abs(det) < 1e-12:
             continue
 
-        for vi in range(y_min, y_max + 1):
-            py = float(vi) + 0.5
-            for ui in range(x_min, x_max + 1):
-                px = float(ui) + 0.5
-                w0 = ((y1 - y2) * (px - x2) + (x2 - x1) * (py - y2)) / det
-                w1 = ((y2 - y0) * (px - x2) + (x0 - x2) * (py - y2)) / det
-                w2 = 1.0 - w0 - w1
-                if w0 < -1e-6 or w1 < -1e-6 or w2 < -1e-6:
-                    continue
-                z = w0 * z0 + w1 * z1 + w2 * z2
-                if z <= 1e-6 or z >= depth_buf[vi, ui]:
-                    continue
-                depth_buf[vi, ui] = z
-                mask_buf[vi, ui] = label
+        uu = np.arange(x_min, x_max + 1, dtype=np.float64) + 0.5
+        vv = np.arange(y_min, y_max + 1, dtype=np.float64) + 0.5
+        px, py = np.meshgrid(uu, vv)
+        w0 = ((y1 - y2) * (px - x2) + (x2 - x1) * (py - y2)) / det
+        w1 = ((y2 - y0) * (px - x2) + (x0 - x2) * (py - y2)) / det
+        w2 = 1.0 - w0 - w1
+        z = w0 * z0 + w1 * z1 + w2 * z2
+        closer = (
+            (w0 >= -1e-6) & (w1 >= -1e-6) & (w2 >= -1e-6)
+            & (z > 1e-6)
+            & (z < depth_buf[y_min:y_max + 1, x_min:x_max + 1])
+        )
+        if not np.any(closer):
+            continue
+        depth_buf[y_min:y_max + 1, x_min:x_max + 1][closer] = z[closer]
+        mask_buf[y_min:y_max + 1, x_min:x_max + 1][closer] = label
 
     return mask_buf
 
@@ -373,9 +379,10 @@ def render_instance_mask_buf(
             if _GL_RENDERER is None:
                 _GL_RENDERER = InstanceMaskRenderer()
             return _GL_RENDERER.render(corners_cam, K, W, H, bg_label=bg_label)
-        except Exception:
+        except Exception as exc:
             _GL_RENDERER = None
             _GL_UNAVAILABLE = True
+            print(f"OpenGL instance-mask renderer unavailable ({exc}); using CPU rasterizer")
     return _render_instance_mask_cpu(corners_cam, K, W, H, bg_label=bg_label)
 
 
@@ -456,10 +463,47 @@ def _ray_triangle_t(
     return t
 
 
+def _ray_triangles_t(
+    origin: np.ndarray,
+    target: np.ndarray,
+    tris: np.ndarray,
+) -> np.ndarray:
+    """Batched ``_ray_triangle_t``; ``nan`` where the ray misses."""
+    if tris.size == 0:
+        return np.zeros((0,), dtype=np.float64)
+    direction = np.asarray(target, dtype=np.float64) - np.asarray(origin, dtype=np.float64)
+    edge1 = tris[:, 1] - tris[:, 0]
+    edge2 = tris[:, 2] - tris[:, 0]
+    h = np.cross(np.broadcast_to(direction, edge2.shape), edge2)
+    det = np.einsum("ij,ij->i", edge1, h)
+    parallel = np.abs(det) < 1e-12
+    inv_det = np.divide(1.0, det, out=np.zeros_like(det), where=~parallel)
+    s = np.asarray(origin, dtype=np.float64) - tris[:, 0]
+    u = inv_det * np.einsum("ij,ij->i", s, h)
+    q = np.cross(s, edge1)
+    v = inv_det * (q @ direction)
+    t = inv_det * np.einsum("ij,ij->i", edge2, q)
+    hit = (~parallel) & (u >= 0.0) & (u <= 1.0) & (v >= 0.0) & (u + v <= 1.0)
+    out = np.full(tris.shape[0], np.nan, dtype=np.float64)
+    out[hit] = t[hit]
+    return out
+
+
+def _all_box_triangles(all_corners_cam: np.ndarray) -> np.ndarray:
+    if all_corners_cam.shape[0] == 0:
+        return np.zeros((0, 3, 3), dtype=np.float64)
+    return np.concatenate(
+        [box_triangles_cam(box_corners) for box_corners in all_corners_cam],
+        axis=0,
+    )
+
+
 def _point_visible_from_camera(
     point: np.ndarray,
     all_corners_cam: np.ndarray,
     eps: float = 1e-6,
+    *,
+    tris: np.ndarray | None = None,
 ) -> bool:
     """
     A 3D point is visible iff the segment camera->point does not pierce any
@@ -470,12 +514,10 @@ def _point_visible_from_camera(
     if point[2] <= eps:
         return False
     origin = np.zeros(3, dtype=np.float64)
-    for box_corners in all_corners_cam:
-        for tri in box_triangles_cam(box_corners):
-            t = _ray_triangle_t(origin, point, tri)
-            if t is not None and eps < t < 1.0 - eps:
-                return False
-    return True
+    if tris is None:
+        tris = _all_box_triangles(all_corners_cam)
+    t = _ray_triangles_t(origin, point, tris)
+    return not bool(np.any((t > eps) & (t < 1.0 - eps)))
 
 
 _BG_LABEL = 255
@@ -633,19 +675,33 @@ def _center_principal_point(K: np.ndarray, W: int, H: int) -> np.ndarray:
 def intrinsics_for_projection(
     camera: Mapping[str, Any],
     frame: Mapping[str, Any] | None = None,
+    *,
+    projection_intrinsics: str | None = None,
 ) -> Tuple[np.ndarray, int, int]:
     """
     Pinhole K for projecting labels onto captured RGB.
 
-    JSON ``intrinsic_matrix`` records the OAK undistorted model. Labels must use
-    ``intrinsics_matching_nyx_render`` so mask/kps align with Nyx PNG output.
-    Principal point is forced to image center ``(W/2, H/2)``.
-    Set ``camera["nyx_fov"]="pinhole"`` to skip Nyx focal adjustment.
+    ``projection_intrinsics``:
+      - ``"pinhole"``: use JSON ``intrinsic_matrix`` as-is (centered principal point)
+      - ``"nyx"``: apply ``intrinsics_matching_nyx_render`` (legacy Nyx vertical-FOV capture)
+      - ``None``: use ``camera["nyx_fov"]`` when set; otherwise ``"nyx"`` for genesis
+        frames (legacy default) and ``"pinhole"`` otherwise.
     """
     K, W, H = intrinsics_from_camera(camera)
-    if frame is not None and _is_genesis_frame(frame):
-        if str(camera.get("nyx_fov", "")).lower() != "pinhole":
-            K = intrinsics_matching_nyx_render(K, W, H)
+    mode = projection_intrinsics
+    if mode is None:
+        explicit = str(camera.get("nyx_fov", "")).lower()
+        if explicit in ("pinhole", "nyx"):
+            mode = explicit
+        elif frame is not None and _is_genesis_frame(frame):
+            mode = "nyx"
+        else:
+            mode = "pinhole"
+    mode = str(mode).lower()
+    if mode == "nyx":
+        K = intrinsics_matching_nyx_render(K, W, H)
+    elif mode != "pinhole":
+        raise ValueError(f"unknown projection_intrinsics={projection_intrinsics!r}")
     K = _center_principal_point(K, W, H)
     return K, W, H
 
@@ -791,6 +847,7 @@ def gen_train_sample_from_json(
     *,
     image_path: Union[str, Path, None] = None,
     images_dir: Union[str, Path, None] = None,
+    projection_intrinsics: str | None = None,
 ) -> Dict[str, Any]:
     """
     Load a frame JSON (+ optional RGB path) and generate aligned training labels.
@@ -806,7 +863,9 @@ def gen_train_sample_from_json(
     """
     json_path = Path(json_path)
     frame = load_frame_json(json_path)
-    K, W, H = intrinsics_for_projection(frame["camera"], frame)
+    K, W, H = intrinsics_for_projection(
+        frame["camera"], frame, projection_intrinsics=projection_intrinsics,
+    )
     boxes = boxes_from_frame(frame)
     labels = labels_from_frame(frame)
     corners_cam = corners_cam_from_frame(frame) if _is_genesis_frame(frame) else None
@@ -835,6 +894,7 @@ def gen_train_sample_from_json(
         "image_path": resolved_image,
         "frame": image_name,
         "frame_index": _frame_index_from_path(json_path, frame),
+        "projection_intrinsics": projection_intrinsics,
     }
 
 
@@ -898,6 +958,35 @@ def load_train_sample_from_labels(
     }
 
 
+def mask_id_to_boxes_xyxy(mask: np.ndarray, num_instances: int) -> List[List[int]]:
+    """Inclusive pixel xyxy tight AABB for instance ids ``0 .. k-1``."""
+    mask = np.asarray(mask)
+    if mask.ndim == 3:
+        mask = mask[..., 0]
+    boxes: List[List[int]] = []
+    for i in range(int(num_instances)):
+        ys, xs = np.where(mask == i)
+        if xs.size == 0:
+            boxes.append([0, 0, 0, 0])
+            continue
+        boxes.append([int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())])
+    return boxes
+
+
+def copy_image_as_jpg(
+    src: Union[str, Path],
+    dst: Union[str, Path],
+    *,
+    quality: int = 95,
+) -> Path:
+    """Write an RGB JPEG copy of ``src`` to ``dst``."""
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    im = Image.open(src).convert("RGB")
+    im.save(dst, format="JPEG", quality=int(quality))
+    return dst
+
+
 def save_train_sample(
     sample: Mapping[str, Any],
     labels_dir: Union[str, Path],
@@ -906,11 +995,11 @@ def save_train_sample(
     source_json: Union[str, Path, None] = None,
 ) -> Path:
     """
-    Persist generated training labels under ``labels_dir`` (flat layout).
+    Persist generated training labels under ``labels_dir``.
 
     Files:
       {stem}_instance_mask.png  P-mode id map (bg=255)
-      {stem}_train.json         kps (k,8,3), inst_labels, box_indices, K, W, H
+      {stem}_train.json         det / seg / kp payloads plus ``has_*`` flags
     """
     labels_dir = Path(labels_dir)
     labels_dir.mkdir(parents=True, exist_ok=True)
@@ -920,22 +1009,48 @@ def save_train_sample(
     mask_filename = f"{stem}{INSTANCE_MASK_SUFFIX}.png"
     sample["instance_mask"].save(labels_dir / mask_filename)
 
-    k = int(sample["kps"].shape[0])
-    image_path = Path(sample["image_path"])
+    mask_arr = np.asarray(sample["instance_mask"], dtype=np.uint8)
+    if mask_arr.ndim == 3:
+        mask_arr = mask_arr[..., 0]
+    kps = ensure_kps_xyv(np.asarray(sample["kps"], dtype=np.float32))
+    k = int(kps.shape[0])
+    inst_labels = np.asarray(sample["inst_labels"], dtype=np.int64).tolist()
+    box_indices = np.asarray(sample["box_indices"], dtype=np.int64).tolist()
+    boxes_xyxy = mask_id_to_boxes_xyxy(mask_arr, k)
+    has_seg = k > 0 and bool(np.any(mask_arr != _BG_LABEL))
+    has_det = any((b[2] > b[0]) and (b[3] > b[1]) for b in boxes_xyxy)
+    has_kp = k > 0
+    image_name = Path(sample["image_path"]).name
+
     train = {
-        "frame": sample.get("frame"),
+        "frame": sample.get("frame") or image_name,
         "frame_index": int(sample.get("frame_index", -1)),
-        "image": image_path.name,
+        "image": image_name,
         "W": int(sample["W"]),
         "H": int(sample["H"]),
         "K": np.asarray(sample["K"], dtype=np.float64).tolist(),
         "num_instances": k,
+        "has_det": bool(has_det),
+        "has_seg": bool(has_seg),
+        "has_kp": bool(has_kp),
+        "det": {
+            "boxes": boxes_xyxy,
+            "labels": inst_labels,
+        },
+        "seg": {
+            "instance_mask": mask_filename,
+        },
+        "kp": {
+            "kps": kps.tolist(),
+        },
         "instance_mask": mask_filename,
-        "kps": ensure_kps_xyv(np.asarray(sample["kps"], dtype=np.float32)).tolist(),
-        "inst_labels": np.asarray(sample["inst_labels"], dtype=np.int64).tolist(),
-        "box_indices": np.asarray(sample["box_indices"], dtype=np.int64).tolist(),
+        "kps": kps.tolist(),
+        "inst_labels": inst_labels,
+        "box_indices": box_indices,
         "source_json": Path(source_json).name if source_json is not None else f"{stem}.json",
     }
+    if sample.get("projection_intrinsics"):
+        train["projection_intrinsics"] = sample["projection_intrinsics"]
     train_path = train_label_path(stem, labels_dir)
     with train_path.open("w", encoding="utf-8") as f:
         json.dump(train, f, indent=2)
@@ -997,6 +1112,320 @@ def gen_and_save_from_dir(
     json_paths = list_raw_label_jsons(labels_dir, pattern)
     samples = [gen_train_sample_from_json(path) for path in json_paths]
     return save_train_samples(samples, labels_dir, source_jsons=json_paths)
+
+
+def _even_indices(n: int, limit: int) -> set[int]:
+    """Evenly spaced indices in ``[0, n)``, at most ``limit`` of them."""
+    if n <= 0 or limit <= 0:
+        return set()
+    if limit >= n:
+        return set(range(n))
+    if limit == 1:
+        return {0}
+    return {int(round(i * (n - 1) / (limit - 1))) for i in range(limit)}
+
+
+def _write_viz_grid(saved: Sequence[Path], out_dir: Path) -> Path | None:
+    """Thumbnail grid of viz PNGs under ``out_dir/all_frames_grid.png``."""
+    from PIL import ImageDraw, ImageFont
+
+    if not saved:
+        return None
+    thumb_w, thumb_h, cols = 480, 384, 6
+    rows = (len(saved) + cols - 1) // cols
+    cell_w, cell_h = thumb_w, thumb_h + 24
+    grid = Image.new("RGB", (cols * cell_w, rows * cell_h), (32, 32, 32))
+    draw_font = ImageFont.load_default()
+    for i, p in enumerate(saved):
+        r, c = divmod(i, cols)
+        im = Image.open(p).convert("RGB")
+        im.thumbnail((thumb_w, thumb_h), Image.Resampling.LANCZOS)
+        canvas = Image.new("RGB", (cell_w, cell_h), (24, 24, 24))
+        ox = (cell_w - im.width) // 2
+        canvas.paste(im, (ox, 0))
+        d = ImageDraw.Draw(canvas)
+        d.text((8, thumb_h + 4), p.stem.replace("_viz", ""), fill=(220, 220, 220), font=draw_font)
+        grid.paste(canvas, (c * cell_w, r * cell_h))
+    grid_path = out_dir / "all_frames_grid.png"
+    grid.save(grid_path)
+    return grid_path
+
+
+def _sample_flags_from_mask(mask_arr: np.ndarray, k: int) -> Tuple[bool, bool, bool]:
+    boxes_xyxy = mask_id_to_boxes_xyxy(mask_arr, k)
+    has_seg = k > 0 and bool(np.any(mask_arr != _BG_LABEL))
+    has_det = any((b[2] > b[0]) and (b[3] > b[1]) for b in boxes_xyxy)
+    has_kp = k > 0
+    return bool(has_det), bool(has_seg), bool(has_kp)
+
+
+def _entry_from_existing(
+    json_path: Path,
+    in_root: Path,
+    out_root: Path,
+) -> Dict[str, Any] | None:
+    """Build an index entry from an already-written train sample, or None."""
+    rel = json_path.relative_to(in_root)
+    sample_dir = out_root / rel.parent
+    stem = json_path.stem
+    train_path = train_label_path(stem, sample_dir)
+    jpg_path = sample_dir / f"{stem}.jpg"
+    mask_path = sample_dir / f"{stem}{INSTANCE_MASK_SUFFIX}.png"
+    if not (train_path.is_file() and jpg_path.is_file() and mask_path.is_file()):
+        return None
+    with train_path.open(encoding="utf-8") as f:
+        train = json.load(f)
+    return {
+        "stem": stem,
+        "rel_dir": str(rel.parent).replace("\\", "/"),
+        "image": jpg_path.name,
+        "train_json": train_path.name,
+        "instance_mask": mask_path.name,
+        "source_json": json_path.name,
+        "num_instances": int(train.get("num_instances", 0)),
+        "has_det": bool(train.get("has_det", False)),
+        "has_seg": bool(train.get("has_seg", False)),
+        "has_kp": bool(train.get("has_kp", False)),
+    }
+
+
+def _process_tree_sample(args: Tuple[Any, ...]) -> Dict[str, Any]:
+    """Worker: generate one mirrored train sample (+ optional viz)."""
+    (
+        index,
+        json_path_s,
+        in_root_s,
+        out_root_s,
+        jpg_quality,
+        do_viz,
+        viz_dir_s,
+        skip_existing,
+        projection_intrinsics,
+    ) = args
+    json_path = Path(json_path_s)
+    in_root = Path(in_root_s)
+    out_root = Path(out_root_s)
+    rel = json_path.relative_to(in_root)
+    sample_dir = out_root / rel.parent
+    stem = json_path.stem
+
+    try:
+        if skip_existing:
+            entry = _entry_from_existing(json_path, in_root, out_root)
+            if entry is not None:
+                viz_path_s = None
+                if do_viz and viz_dir_s:
+                    viz_name = f"{rel.parts[0]}_{stem}_viz.png" if rel.parts else f"{stem}_viz.png"
+                    viz_path = Path(viz_dir_s) / viz_name
+                    if not viz_path.is_file():
+                        sample = load_train_sample_from_labels(
+                            stem, sample_dir, images_dir=sample_dir,
+                        )
+                        sample["projection_intrinsics"] = projection_intrinsics
+                        save_sample_visualization(
+                            json_path,
+                            viz_path,
+                            image_path=sample_dir / f"{stem}.jpg",
+                            sample=sample,
+                            projection_intrinsics=projection_intrinsics,
+                        )
+                    viz_path_s = str(viz_path)
+                return {
+                    "index": index,
+                    "entry": entry,
+                    "viz_path": viz_path_s,
+                    "skipped": True,
+                    "error": None,
+                    "rel": str(rel),
+                }
+
+        sample = gen_train_sample_from_json(
+            json_path, projection_intrinsics=projection_intrinsics,
+        )
+        jpg_path = copy_image_as_jpg(
+            sample["image_path"], sample_dir / f"{stem}.jpg", quality=jpg_quality,
+        )
+        sample["image_path"] = jpg_path
+        sample["frame"] = jpg_path.name
+        save_train_sample(sample, sample_dir, stem=stem, source_json=json_path)
+
+        k = int(sample["kps"].shape[0])
+        mask_arr = np.asarray(sample["instance_mask"], dtype=np.uint8)
+        if mask_arr.ndim == 3:
+            mask_arr = mask_arr[..., 0]
+        has_det, has_seg, has_kp = _sample_flags_from_mask(mask_arr, k)
+        entry = {
+            "stem": stem,
+            "rel_dir": str(rel.parent).replace("\\", "/"),
+            "image": jpg_path.name,
+            "train_json": f"{stem}{TRAIN_LABEL_SUFFIX}.json",
+            "instance_mask": f"{stem}{INSTANCE_MASK_SUFFIX}.png",
+            "source_json": json_path.name,
+            "num_instances": k,
+            "has_det": has_det,
+            "has_seg": has_seg,
+            "has_kp": has_kp,
+        }
+
+        viz_path_s = None
+        if do_viz and viz_dir_s:
+            viz_name = f"{rel.parts[0]}_{stem}_viz.png" if rel.parts else f"{stem}_viz.png"
+            viz_path = Path(viz_dir_s) / viz_name
+            save_sample_visualization(
+                json_path,
+                viz_path,
+                image_path=jpg_path,
+                sample=sample,
+                projection_intrinsics=projection_intrinsics,
+            )
+            viz_path_s = str(viz_path)
+
+        return {
+            "index": index,
+            "entry": entry,
+            "viz_path": viz_path_s,
+            "skipped": False,
+            "error": None,
+            "rel": str(rel),
+        }
+    except Exception as exc:
+        return {
+            "index": index,
+            "entry": None,
+            "viz_path": None,
+            "skipped": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "rel": str(rel),
+        }
+
+
+def gen_and_save_from_tree(
+    in_root: Union[str, Path],
+    out_root: Union[str, Path],
+    *,
+    pattern: str = "*.json",
+    jpg_quality: int = 95,
+    viz_dir: Union[str, Path, None] = None,
+    viz_limit: int = 24,
+    workers: int = 1,
+    skip_existing: bool = True,
+    projection_intrinsics: str = "pinhole",
+) -> Path:
+    """
+    Mirror a nested capture tree into train samples.
+
+    For each raw JSON under ``in_root``, writes next to the mirrored path:
+      {stem}.jpg, {stem}_instance_mask.png, {stem}_train.json
+    and a root ``index.json`` listing every sample.
+
+    ``workers > 1`` uses a process pool (CPU rasterization / I/O). Already-written
+    samples are skipped when ``skip_existing`` is True.
+
+    Default ``projection_intrinsics="pinhole"`` matches fill_container RGB captures;
+    use ``"nyx"`` only for legacy Nyx vertical-FOV renders.
+    """
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    import os
+
+    in_root = Path(in_root).resolve()
+    out_root = Path(out_root).resolve()
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    json_paths = list_raw_label_jsons(in_root, pattern, recursive=True)
+    if not json_paths:
+        raise FileNotFoundError(f"No raw label JSON files under {in_root} (pattern={pattern!r})")
+
+    viz_indices = _even_indices(len(json_paths), int(viz_limit)) if viz_dir else set()
+    viz_out = Path(viz_dir) if viz_dir else None
+    if viz_out is not None:
+        viz_out.mkdir(parents=True, exist_ok=True)
+
+    n = len(json_paths)
+    workers = max(1, int(workers))
+    if workers > 1:
+        workers = min(workers, n, os.cpu_count() or workers)
+
+    jobs = [
+        (
+            i,
+            str(json_path),
+            str(in_root),
+            str(out_root),
+            int(jpg_quality),
+            i in viz_indices,
+            str(viz_out) if viz_out is not None else None,
+            bool(skip_existing),
+            str(projection_intrinsics),
+        )
+        for i, json_path in enumerate(json_paths)
+    ]
+
+    results: List[Dict[str, Any] | None] = [None] * n
+    done = 0
+    skipped = 0
+    errors: List[Dict[str, str]] = []
+
+    def _consume(result: Dict[str, Any]) -> None:
+        nonlocal done, skipped
+        results[int(result["index"])] = result
+        done += 1
+        if result.get("skipped"):
+            skipped += 1
+        if result.get("error"):
+            errors.append({"rel": str(result.get("rel", "")), "error": str(result["error"])})
+            print(f"ERROR [{done}/{n}] {result.get('rel')}: {result['error']}")
+            return
+        entry = result["entry"]
+        if result.get("viz_path"):
+            print(f"Viz: {result['viz_path']} (k={entry['num_instances']})")
+        if done % 50 == 0 or done == 1 or done == n:
+            print(
+                f"[{done}/{n}] {result['rel']} k={entry['num_instances']} "
+                f"has_det={entry['has_det']} has_seg={entry['has_seg']} "
+                f"has_kp={entry['has_kp']} skipped={skipped} workers={workers}"
+            )
+
+    print(
+        f"Processing {n} samples with {workers} workers "
+        f"(skip_existing={skip_existing}, projection_intrinsics={projection_intrinsics})"
+    )
+    if workers == 1:
+        for job in jobs:
+            _consume(_process_tree_sample(job))
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_process_tree_sample, job) for job in jobs]
+            for fut in as_completed(futures):
+                _consume(fut.result())
+
+    entries = [r["entry"] for r in results if r is not None and r.get("entry") is not None]
+    viz_saved = [
+        Path(r["viz_path"]) for r in results if r is not None and r.get("viz_path")
+    ]
+
+    index_path = out_root / "index.json"
+    with index_path.open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "samples": entries,
+                "errors": errors,
+                "projection_intrinsics": projection_intrinsics,
+            },
+            f,
+            indent=2,
+        )
+        f.write("\n")
+
+    if viz_saved and viz_out is not None:
+        grid_path = _write_viz_grid(viz_saved, viz_out)
+        if grid_path is not None:
+            print(f"Grid: {grid_path}")
+
+    print(
+        f"Saved {len(entries)} samples (skipped {skipped}, errors {len(errors)}), "
+        f"index: {index_path}"
+    )
+    return index_path
 
 
 _BOX_EDGES = (
@@ -1145,11 +1574,12 @@ def overlay_wireframes_on_rgb(
     *,
     line_thickness: int = 2,
     point_radius: int = 5,
+    projection_intrinsics: str | None = None,
 ) -> np.ndarray:
     """
     Draw 3D box wireframes on RGB (same projection as ``replay_box_capture``).
 
-    Uses ``corners_cam_from_frame`` + ``intrinsics_for_projection`` (Nyx-render K).
+    Uses ``corners_cam_from_frame`` + ``intrinsics_for_projection``.
     """
     import cv2
 
@@ -1157,7 +1587,9 @@ def overlay_wireframes_on_rgb(
     if corners.shape[0] == 0:
         return cv2.cvtColor(np.asarray(rgb)[..., :3], cv2.COLOR_RGB2BGR)
 
-    K, W, H = intrinsics_for_projection(frame["camera"], frame)
+    K, W, H = intrinsics_for_projection(
+        frame["camera"], frame, projection_intrinsics=projection_intrinsics,
+    )
     vis = np.asarray(rgb)
     if vis.dtype != np.uint8:
         vis = np.clip(vis, 0, 255).astype(np.uint8)
@@ -1216,6 +1648,11 @@ def overlay_mask_kps_on_bgr(
         region = mask == inst_id
         if np.any(region):
             out[region] = out[region] * (1.0 - mask_alpha) + color[::-1] * mask_alpha
+            ys, xs = np.where(region)
+            x0, y0 = int(xs.min()), int(ys.min())
+            x1, y1 = int(xs.max()), int(ys.max())
+            bgr_c = (int(color[2]), int(color[1]), int(color[0]))
+            cv2.rectangle(out, (x0, y0), (x1, y1), bgr_c, 2, cv2.LINE_AA)
         for ci in range(8):
             if not kp_corner_valid(kps[inst_id, ci]):
                 continue
@@ -1439,15 +1876,22 @@ def render_sample_visualization(
     *,
     image_path: Union[str, Path, None] = None,
     sample: Mapping[str, Any] | None = None,
+    projection_intrinsics: str | None = None,
 ) -> np.ndarray:
     """RGB + wireframe + instance mask + kps (BGR uint8)."""
     json_path = Path(json_path)
     frame = load_frame_json(json_path)
     if sample is None:
-        sample = gen_train_sample_from_json(json_path, image_path=image_path)
+        sample = gen_train_sample_from_json(
+            json_path, image_path=image_path, projection_intrinsics=projection_intrinsics,
+        )
+    elif projection_intrinsics is None:
+        projection_intrinsics = sample.get("projection_intrinsics")
     rgb_path = Path(image_path) if image_path is not None else Path(sample["image_path"])
     rgb = np.array(Image.open(rgb_path).convert("RGB"))
-    bgr = overlay_wireframes_on_rgb(rgb, frame)
+    bgr = overlay_wireframes_on_rgb(
+        rgb, frame, projection_intrinsics=projection_intrinsics,
+    )
     return overlay_mask_kps_on_bgr(bgr, sample)
 
 
@@ -1457,13 +1901,17 @@ def save_sample_visualization(
     *,
     image_path: Union[str, Path, None] = None,
     sample: Mapping[str, Any] | None = None,
+    projection_intrinsics: str | None = None,
 ) -> Path:
     import cv2
 
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(output), render_sample_visualization(
-        json_path, image_path=image_path, sample=sample,
+        json_path,
+        image_path=image_path,
+        sample=sample,
+        projection_intrinsics=projection_intrinsics,
     ))
     return output
 
@@ -1524,9 +1972,11 @@ def _corner_visible(
     all_corners_cam: np.ndarray,
     W: int,
     H: int,
+    *,
+    tris: np.ndarray | None = None,
 ) -> bool:
     """Visible iff unobstructed along camera ray and inside the image."""
-    if not _point_visible_from_camera(point, all_corners_cam):
+    if not _point_visible_from_camera(point, all_corners_cam, tris=tris):
         return False
     if u < 0 or u >= W or v < 0 or v >= H:
         return False
@@ -1610,6 +2060,7 @@ def gen_train_sample(
 
     kps = np.zeros((k, 8, _KP_DIM), dtype=np.float32)
     kps[..., 2] = _KP_INVALID
+    all_tris = _all_box_triangles(corners_cam)
     # (depth, out_i, ui, vi) — paint nearer corners last so they win overlaps.
     corner_splats: list[tuple[float, int, int, int]] = []
     for out_i, src_label in enumerate(visible_labels):
@@ -1621,7 +2072,7 @@ def gen_train_sample(
             if z > 1e-6:
                 kps[out_i, c, 0] = float(u)
                 kps[out_i, c, 1] = float(v)
-            if _corner_visible(point, u, v, corners_cam, W, H):
+            if _corner_visible(point, u, v, corners_cam, W, H, tris=all_tris):
                 kps[out_i, c, 2] = _KP_VALID
                 ui = int(round(u))
                 vi = int(round(v))
@@ -1681,7 +2132,19 @@ def _main() -> None:
     parser.add_argument(
         "inputs",
         nargs="*",
-        help="Raw label JSON file(s); default: all under --labels-dir",
+        help="Raw label JSON file(s); default: all under --labels-dir or --in-root",
+    )
+    parser.add_argument(
+        "--in-root",
+        type=str,
+        default=None,
+        help="Source tree of capture JSON+PNG; mirrored into --out-root",
+    )
+    parser.add_argument(
+        "--out-root",
+        type=str,
+        default=None,
+        help="Output tree for jpg + *_train.json + instance masks (requires --in-root)",
     )
     parser.add_argument(
         "--labels-dir",
@@ -1702,10 +2165,45 @@ def _main() -> None:
         help="Glob pattern for raw annotation files",
     )
     parser.add_argument(
+        "--recursive",
+        action="store_true",
+        help="Recurse when listing JSON under --labels-dir",
+    )
+    parser.add_argument(
+        "--jpg-quality",
+        type=int,
+        default=95,
+        help="JPEG quality when copying RGB into --out-root",
+    )
+    parser.add_argument(
         "--viz-dir",
         type=str,
         default=None,
-        help="If set, write RGB+wireframe+mask+kps PNGs under this directory",
+        help="If set, write RGB+wireframe+mask+kps+2D-box PNGs under this directory",
+    )
+    parser.add_argument(
+        "--viz-limit",
+        type=int,
+        default=24,
+        help="Max viz frames when --viz-dir is set (evenly sampled; default 24)",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Process-pool size for --in-root generation (default 1)",
+    )
+    parser.add_argument(
+        "--intrinsics",
+        type=str,
+        default="pinhole",
+        choices=("pinhole", "nyx"),
+        help="Projection intrinsics for --in-root (default pinhole; nyx=legacy FOV fix)",
+    )
+    parser.add_argument(
+        "--no-skip-existing",
+        action="store_true",
+        help="Regenerate even if jpg/mask/train json already exist",
     )
     parser.add_argument(
         "--viz-inst-dir",
@@ -1715,13 +2213,32 @@ def _main() -> None:
     )
     args = parser.parse_args()
 
+    if args.in_root:
+        if not args.out_root:
+            raise SystemExit("--out-root is required with --in-root")
+        pattern = args.pattern if args.pattern != "frame_*.json" else "*.json"
+        gen_and_save_from_tree(
+            args.in_root,
+            args.out_root,
+            pattern=pattern,
+            jpg_quality=args.jpg_quality,
+            viz_dir=args.viz_dir,
+            viz_limit=args.viz_limit,
+            workers=args.workers,
+            skip_existing=not args.no_skip_existing,
+            projection_intrinsics=args.intrinsics,
+        )
+        return
+
     labels_dir = Path(args.labels_dir)
     images_dir = Path(args.images_dir)
 
     if args.inputs:
         json_paths = [Path(p) for p in args.inputs if is_raw_label_json(p)]
     else:
-        json_paths = list_raw_label_jsons(labels_dir, args.pattern)
+        json_paths = list_raw_label_jsons(
+            labels_dir, args.pattern, recursive=args.recursive,
+        )
 
     if not json_paths:
         raise SystemExit(f"No raw label JSON files found under {labels_dir}")
