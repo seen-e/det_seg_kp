@@ -334,7 +334,7 @@ def main() -> None:
                 ckpt_path = os.path.join(cfg.train.output_dir, f"checkpoint_epoch{epoch}.pth")
                 save_checkpoint(ckpt_path, epoch, model, optimizer, cfg, ema=ema)
                 log_info(rank, f"Saved checkpoint: {ckpt_path}")
-                if wandb_run is not None:
+                if wandb_run is not None and cfg.train.wandb_save_checkpoint:
                     wandb_run.save(ckpt_path, base_path=cfg.train.output_dir, policy="now")
 
         if is_main_process(rank):
@@ -342,7 +342,8 @@ def main() -> None:
             save_checkpoint(final_path, cfg.train.epochs, model, optimizer, cfg, ema=ema)
             log_info(rank, f"\nTraining complete. Final checkpoint: {final_path}")
             if wandb_run is not None:
-                wandb_run.save(final_path, base_path=cfg.train.output_dir, policy="now")
+                if cfg.train.wandb_save_checkpoint:
+                    wandb_run.save(final_path, base_path=cfg.train.output_dir, policy="now")
                 wandb_run.finish()
 
     finally:

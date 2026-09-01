@@ -112,7 +112,10 @@ def kps_to_heatmaps(
 def boxes_xyxy_to_cxcywh_norm(boxes: np.ndarray, height: int, width: int) -> np.ndarray:
     """Exclusive xyxy (N,4) → normalized cxcywh in [0, 1]. Empty → small centered box."""
     boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
-    out = np.zeros((boxes.shape[0], 4), dtype=np.float32)
+    n = boxes.shape[0]
+    out = np.zeros((n, 4), dtype=np.float32)
+    if n == 0:
+        return out
     w = float(width)
     h = float(height)
     bw = boxes[:, 2] - boxes[:, 0]
@@ -301,7 +304,20 @@ class DetSegKPDataset(Dataset):
             mask = mask[..., 0]
         kps = ensure_kps_xyv(np.asarray(sample["kps"], dtype=np.float32))
         labels = np.asarray(sample["inst_labels"], dtype=np.int64)
-        boxes = np.asarray(sample["boxes"], dtype=np.float32).reshape(-1, 4)
+        if labels.size == 0:
+            labels = np.zeros((kps.shape[0],), dtype=np.int64)
+        elif labels.shape[0] != kps.shape[0]:
+            n = kps.shape[0]
+            out = np.zeros((n,), dtype=np.int64)
+            out[: min(n, labels.shape[0])] = labels[: min(n, labels.shape[0])]
+            labels = out
+        boxes = sample.get("boxes")
+        if boxes is None:
+            boxes = np.zeros((kps.shape[0], 4), dtype=np.float32)
+        else:
+            boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
+            if boxes.shape[0] != kps.shape[0]:
+                boxes = np.zeros((kps.shape[0], 4), dtype=np.float32)
         return {
             "image": image,
             "mask": mask,
@@ -392,18 +408,15 @@ def build_dataloader(
     if sampler is not None:
         shuffle = False
 
-    loader_kwargs = dict(
-        dataset=dataset,
+    return DataLoader(
+        dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         sampler=sampler,
         num_workers=cfg.data.num_workers,
         collate_fn=collate_fn,
         pin_memory=True,
+        persistent_workers=cfg.data.num_workers > 0,
+        worker_init_fn=_worker_init_fn if cfg.data.num_workers > 0 else None,
         drop_last=split == "train",
     )
-    if cfg.data.num_workers > 0:
-        loader_kwargs["persistent_workers"] = True
-        loader_kwargs["prefetch_factor"] = max(2, int(cfg.data.prefetch_factor))
-        loader_kwargs["worker_init_fn"] = _worker_init_fn
-    return DataLoader(**loader_kwargs)

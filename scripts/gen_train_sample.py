@@ -940,11 +940,6 @@ def load_train_sample_from_labels(
     K = np.asarray(train["K"], dtype=np.float64)
     W, H = int(train["W"]), int(train["H"])
     k = int(kps.shape[0])
-    if inst_labels.shape[0] != k:
-        out = np.zeros((k,), dtype=np.int64)
-        n = min(k, int(inst_labels.shape[0]))
-        out[:n] = inst_labels[:n]
-        inst_labels = out
     mask_arr = np.asarray(mask, dtype=np.uint8)
     if mask_arr.ndim == 3:
         mask_arr = mask_arr[..., 0]

@@ -166,6 +166,7 @@ class TrainConfig:
     wandb_project: str = "det_seg_kp"
     wandb_run_name: str = ""
     wandb_entity: str = ""
+    wandb_save_checkpoint: bool = True
 
     loss_cls: float = 2.0
     loss_bbox: float = 5.0

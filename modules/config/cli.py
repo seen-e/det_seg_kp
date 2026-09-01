@@ -116,6 +116,11 @@ def build_train_parser(cfg: Config | None = None) -> argparse.ArgumentParser:
     _add_opt(p, "--wandb-project", dest="wandb_project", type_=str, cfg=cfg, path="train.wandb_project")
     _add_opt(p, "--wandb-run-name", dest="wandb_run_name", type_=str, cfg=cfg, path="train.wandb_run_name")
     _add_opt(p, "--wandb-entity", dest="wandb_entity", type_=str, cfg=cfg, path="train.wandb_entity")
+    p.add_argument(
+        "--no-wandb-save-checkpoint",
+        action="store_true",
+        help="Do not upload checkpoints to wandb (metrics/images still logged)",
+    )
     p.add_argument("--wandb-tags", nargs="*", default=None, help="Optional wandb tags")
 
     return p
@@ -124,7 +129,11 @@ def build_train_parser(cfg: Config | None = None) -> argparse.ArgumentParser:
 def config_from_args(args: argparse.Namespace, base: Config | None = None) -> Config:
     """Merge explicit CLI flags and ``--opt`` overrides into a :class:`Config`."""
     cfg = base or Config()
-    explicit = {k: v for k, v in vars(args).items() if k not in ("opt", "dist_backend", "wandb_tags")}
+    explicit = {
+        k: v
+        for k, v in vars(args).items()
+        if k not in ("opt", "dist_backend", "wandb_tags", "no_wandb_save_checkpoint")
+    }
 
     _FIELD_MAP = {
         "epochs": "train.epochs",
@@ -153,6 +162,8 @@ def config_from_args(args: argparse.Namespace, base: Config | None = None) -> Co
         cfg.train.use_ema = False
     if getattr(args, "wandb", False):
         cfg.train.use_wandb = True
+    if getattr(args, "no_wandb_save_checkpoint", False):
+        cfg.train.wandb_save_checkpoint = False
 
     apply_opts(cfg, args.opt)
 

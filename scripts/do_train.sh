@@ -10,7 +10,8 @@
 #   NPROC_PER_NODE   GPUs per node (default: auto-detect)
 #   DATA_ROOT        dataset root (default: ./data)
 #   OUTPUT_DIR       checkpoint directory (default: ./work_dirs)
-#   WANDB=0          disable Weights & Biases (default: on)
+#   WANDB=0              disable Weights & Biases (default: on)
+#   WANDB_SAVE_CKPT=0    do not upload checkpoints to wandb (default: on)
 #
 # Less common settings use --opt (see modules.config.Config):
 #   bash scripts/do_train.sh --opt data.img_width=1280 --opt train.val_interval=500
@@ -33,6 +34,7 @@ DIST_BACKEND="${DIST_BACKEND:-nccl}"
 WANDB_PROJECT="${WANDB_PROJECT:-det_seg_kp}"
 WANDB_RUN_NAME="${WANDB_RUN_NAME:-}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
+WANDB_SAVE_CKPT="${WANDB_SAVE_CKPT:0}"
 
 if [[ -z "${NPROC_PER_NODE:-}" ]]; then
   if command -v nvidia-smi >/dev/null 2>&1; then
@@ -62,13 +64,16 @@ TRAIN_ARGS=(
   --opt "train.log_interval=${LOG_INTERVAL:-10}"
   --opt "train.vis_interval=${VIS_INTERVAL:-100}"
   --opt "train.val_interval=${VAL_INTERVAL:-1000}"
-  --opt "train.save_interval=${SAVE_INTERVAL:-5000}"
+  --opt "train.save_interval=${SAVE_INTERVAL:-50}"
 )
 
 if [[ "${WANDB:-1}" == "1" ]]; then
   TRAIN_ARGS+=(--wandb --wandb-project "$WANDB_PROJECT")
   [[ -n "$WANDB_RUN_NAME" ]] && TRAIN_ARGS+=(--wandb-run-name "$WANDB_RUN_NAME")
   [[ -n "$WANDB_ENTITY" ]] && TRAIN_ARGS+=(--wandb-entity "$WANDB_ENTITY")
+  if [[ "${WANDB_SAVE_CKPT:-1}" != "1" ]]; then
+    TRAIN_ARGS+=(--no-wandb-save-checkpoint)
+  fi
 fi
 
 TRAIN_ARGS+=("$@")
@@ -78,6 +83,7 @@ echo "GPUs (NPROC_PER_NODE): $NPROC_PER_NODE"
 echo "Data root: $DATA_ROOT"
 echo "Output dir: $OUTPUT_DIR"
 echo "wandb: ${WANDB:-1}"
+echo "wandb save ckpt: ${WANDB_SAVE_CKPT:-1}"
 
 if [[ "$NPROC_PER_NODE" -gt 1 ]]; then
   exec torchrun \

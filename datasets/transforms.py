@@ -93,84 +93,40 @@ def _apply_affine_xy(xy: np.ndarray, M_fwd: np.ndarray) -> np.ndarray:
     )
 
 
-def _clip_boxes_xyxy(boxes: np.ndarray, width: int, height: int) -> np.ndarray:
-    """Clip exclusive xyxy to ``[0, W] x [0, H]``; zero out empty boxes."""
-    boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4).copy()
-    boxes[:, 0] = np.clip(boxes[:, 0], 0.0, float(width))
-    boxes[:, 2] = np.clip(boxes[:, 2], 0.0, float(width))
-    boxes[:, 1] = np.clip(boxes[:, 1], 0.0, float(height))
-    boxes[:, 3] = np.clip(boxes[:, 3], 0.0, float(height))
-    empty = ~((boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1]))
-    boxes[empty] = 0.0
-    return boxes
-
-
 def _warp_image_mask_kps(
     image_rgb: np.ndarray,
     mask: np.ndarray,
     kps: np.ndarray,
-    boxes: np.ndarray,
     M_fwd: np.ndarray,
     out_w: int,
     out_h: int,
     *,
     do_flip_perm: bool = False,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """One ``warpAffine`` for image + mask; transform kps/boxes with the same M.
-
-    ``M_fwd`` maps source → output. OpenCV ``warpAffine`` (without
-    ``WARP_INVERSE_MAP``) treats ``M`` as that forward map and inverts it
-    internally for sampling — pass ``M_fwd``, not ``inv(M_fwd)``.
-    """
-    M_2x3 = _as_2x3(M_fwd)
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """One ``warpAffine`` for image + mask; transform kps with the same forward M."""
+    M_inv = _as_2x3(np.linalg.inv(M_fwd))
     image_out = cv2.warpAffine(
-        np.ascontiguousarray(image_rgb),
-        M_2x3,
+        image_rgb,
+        M_inv,
         (out_w, out_h),
         flags=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=(0, 0, 0),
     )
     mask_out = cv2.warpAffine(
-        np.ascontiguousarray(mask),
-        M_2x3,
+        mask,
+        M_inv,
         (out_w, out_h),
         flags=cv2.INTER_NEAREST,
         borderMode=cv2.BORDER_CONSTANT,
-        borderValue=int(_MASK_BG),
+        borderValue=_MASK_BG,
     )
     kps = ensure_kps_xyv(kps).copy()
-    kps[..., :2] = _apply_affine_xy(kps[..., :2], M_fwd)
-    if do_flip_perm:
-        kps = kps[:, _FLIP_CORNER_PERM]
-    kps = invalidate_oob_kps(kps, out_w, out_h)
-    boxes_out = _clip_boxes_xyxy(_transform_boxes_xyxy(boxes, M_fwd), out_w, out_h)
-    return image_out, mask_out, kps, boxes_out
-
-
-def _transform_boxes_xyxy(boxes: np.ndarray, M_fwd: np.ndarray) -> np.ndarray:
-    """Map exclusive xyxy through affine; rebuild axis-aligned AABB."""
-    boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
-    x0, y0, x1, y1 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-    # four corners of each box (exclusive edges use x1-eps conceptually; use corners)
-    corners = np.stack(
-        [
-            np.stack([x0, y0], axis=-1),
-            np.stack([x1, y0], axis=-1),
-            np.stack([x1, y1], axis=-1),
-            np.stack([x0, y1], axis=-1),
-        ],
-        axis=1,
-    )  # (N, 4, 2)
-    mapped = _apply_affine_xy(corners, M_fwd)
-    out = np.zeros_like(boxes)
-    out[:, 0] = mapped[:, :, 0].min(axis=1)
-    out[:, 1] = mapped[:, :, 1].min(axis=1)
-    out[:, 2] = mapped[:, :, 0].max(axis=1)
-    out[:, 3] = mapped[:, :, 1].max(axis=1)
-    empty = ~((boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1]))
-    out[empty] = 0.0
-    return out
+    if kps.size:
+        kps[..., :2] = _apply_affine_xy(kps[..., :2], M_fwd)
+        if do_flip_perm:
+            kps = kps[:, _FLIP_CORNER_PERM]
+    return image_out, mask_out, invalidate_oob_kps(kps, out_w, out_h)
 
 
 class DetSegKPTransform:
@@ -198,16 +154,16 @@ class DetSegKPTransform:
             cfg.min_box_area_hm,
             cfg.min_mask_pixels,
         )
-        self.color_jitter = (
-            ColorJitter(
+        if train:
+            self.color_jitter = ColorJitter(
                 brightness=cfg.color_brightness,
                 contrast=cfg.color_contrast,
                 saturation=cfg.color_saturation,
                 hue=cfg.color_hue,
             )
-            if self.train
-            else None
-        )
+        else:
+            self.color_jitter = None
+
     def _scale_factor(self) -> float:
         if not self.train:
             return 1.0
@@ -249,8 +205,7 @@ class DetSegKPTransform:
         mask: np.ndarray,
         kps: np.ndarray,
         labels: np.ndarray,
-        boxes: np.ndarray,
-    ) -> Tuple[Image.Image, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> Tuple[Image.Image, np.ndarray, np.ndarray, np.ndarray]:
         if image.mode != "RGB":
             image = image.convert("RGB")
         image_rgb = np.asarray(image, dtype=np.uint8)
@@ -258,15 +213,12 @@ class DetSegKPTransform:
         if mask.ndim == 3:
             mask = mask[..., 0]
         src_h, src_w = image_rgb.shape[:2]
-        kps = ensure_kps_xyv(kps)
-        boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
 
         M_fwd, do_flip = self._sample_geometry(src_w, src_h)
-        image_rgb, mask, kps, boxes = _warp_image_mask_kps(
+        image_rgb, mask, kps = _warp_image_mask_kps(
             image_rgb,
             mask,
             kps,
-            boxes,
             M_fwd,
             self.img_w,
             self.img_h,
@@ -277,7 +229,7 @@ class DetSegKPTransform:
         if self.color_jitter is not None:
             image = self.color_jitter(image)
         labels = np.asarray(labels, dtype=np.int64)
-        mask, kps, labels, boxes = self.instance_filters(
-            mask, kps, labels, boxes, stride=self.stride
+        mask, kps, labels = self.instance_filters(
+            mask, kps, labels, stride=self.stride
         )
-        return image, mask, kps, labels, boxes
+        return image, mask, kps, labels

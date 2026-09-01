@@ -50,7 +50,11 @@ def apply_keep(
     kps = ensure_kps_xyv(kps)
     labels = np.asarray(labels, dtype=np.int64)
     keep = np.asarray(keep, dtype=bool)
+    n = int(keep.shape[0])
     boxes_arr = None if boxes is None else np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
+
+    if n == 0 or keep.all():
+        return mask, kps, labels, boxes_arr
 
     old_ids = np.nonzero(keep)[0]
     if old_ids.size == 0:
@@ -186,6 +190,8 @@ class ComposeInstanceFilters:
         kps = ensure_kps_xyv(kps)
         n = int(labels.shape[0])
         boxes_arr = None if boxes is None else np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
+        if n == 0 or not self.filters:
+            return mask, kps, labels, boxes_arr
 
         keep = np.ones((n,), dtype=bool)
         for f in self.filters:

@@ -11,5 +11,8 @@ outputs/
 # training data
 data/
 
+# deploy code 
+deploy
+
 # python cache
 **/__pycache__/

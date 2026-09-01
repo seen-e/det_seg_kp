@@ -112,6 +112,7 @@ bash scripts/do_train.sh
 | `WARMUP_RATIO` | `0` | cosine 前 warmup 比例；`0` 关闭 |
 | `PRECISION` | `bf16` | `fp32` / `fp16` / `bf16` / `amp` |
 | `WANDB` | `1` | 设为 `0` 关闭 |
+| `WANDB_SAVE_CKPT` | `1` | 设为 `0` 不上传 checkpoint 到 wandb |
 
 ```bash
 bash scripts/do_train.sh --epochs 1000 --batch-size 2 --lr 5e-5
