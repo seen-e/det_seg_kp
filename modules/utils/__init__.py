@@ -10,7 +10,7 @@ from .common import (
     set_seed,
 )
 from .precision import PRECISION_CHOICES, PrecisionSpec, resolve_precision
-from .visualize import log_train_visualization, render_gt_pred_strip
+from .visualize import log_train_visualization, log_val_visualization, render_gt_pred_strip
 
 __all__ = [
     "PRECISION_CHOICES",
@@ -24,5 +24,6 @@ __all__ = [
     "generalized_box_iou",
     "gaussian_heatmap",
     "log_train_visualization",
+    "log_val_visualization",
     "render_gt_pred_strip",
 ]

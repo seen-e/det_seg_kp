@@ -208,89 +208,96 @@ def _aligned_to_gt_slots(
     return matched
 
 
+def _as_boxes_np(t: Optional[torch.Tensor]) -> np.ndarray:
+    """(N, 4) cxcywh or empty (0, 4)."""
+    if t is None or t.numel() == 0:
+        return np.zeros((0, 4), dtype=np.float32)
+    return t.detach().float().cpu().numpy()
+
+
+def _heatmap_hw(
+    masks_t: Optional[torch.Tensor],
+    pred_masks_t: torch.Tensor,
+    image_hw: Tuple[int, int],
+    stride: int,
+) -> Tuple[int, int]:
+    """Prefer GT / pred mask spatial size; else image // stride."""
+    for t in (masks_t, pred_masks_t):
+        if t is not None and t.numel() > 0:
+            return int(t.shape[-2]), int(t.shape[-1])
+    h, w = image_hw
+    return max(h // int(stride), 1), max(w // int(stride), 1)
+
+
 def render_gt_pred_strip(
     image: torch.Tensor,
     target: Dict[str, torch.Tensor],
     pred: Dict[str, torch.Tensor],
     stride: int,
     score_threshold: float = 0.5,
+    *,
+    match_to_gt: bool = True,
 ) -> np.ndarray:
     """One sample: RGB | GT-Det | GT-Seg | GT-KPS | Pred-Det | Pred-Seg | Pred-KPS.
 
-    Uses last-layer predictions. Matched Pred instances share GT colors.
-    Pred-Det draws matched boxes with score above ``score_threshold``.
-    GT-KPS / Pred-KPS are colorized heatmaps on black.
+    ``match_to_gt`` (train): Pred aligned to GT slots/colors, matched boxes only.
+    Otherwise (val): all queries with score > ``score_threshold`` (FPs included).
     """
     rgb_full = _to_numpy_image(image)
-    masks_t = target.get("masks")
-    kp_maps_t = target.get("kp_maps")
-    pred_masks_t = pred["pred_masks"]
-    pred_kps_t = pred["pred_kps"]
-
-    if masks_t is not None and masks_t.numel() > 0:
-        hs, ws = int(masks_t.shape[-2]), int(masks_t.shape[-1])
-    elif pred_masks_t is not None and pred_masks_t.numel() > 0:
-        hs, ws = int(pred_masks_t.shape[-2]), int(pred_masks_t.shape[-1])
-    else:
-        hs = max(int(rgb_full.shape[0]) // int(stride), 1)
-        ws = max(int(rgb_full.shape[1]) // int(stride), 1)
-
+    masks_t, kp_maps_t = target.get("masks"), target.get("kp_maps")
+    pred_masks_t, pred_kps_t = pred["pred_masks"], pred["pred_kps"]
+    hs, ws = _heatmap_hw(masks_t, pred_masks_t, rgb_full.shape[:2], stride)
     rgb = _resize_rgb(rgb_full, hs, ws)
 
-    gt_masks = (
-        _as_hw_masks(masks_t, hs, ws)
-        if masks_t is not None
-        else np.zeros((0, hs, ws), dtype=np.float32)
-    )
-    gt_heat = (
-        _as_hw_masks(kp_maps_t, hs, ws)
-        if kp_maps_t is not None
-        else np.zeros((0, hs, ws), dtype=np.float32)
-    )
-    boxes_t = target.get("boxes")
-    if boxes_t is not None and boxes_t.numel() > 0:
-        gt_boxes = boxes_t.detach().float().cpu().numpy()
-    else:
-        gt_boxes = np.zeros((0, 4), dtype=np.float32)
-
+    gt_masks = _as_hw_masks(masks_t, hs, ws)
+    gt_heat = _as_hw_masks(kp_maps_t, hs, ws)
+    gt_boxes = _as_boxes_np(target.get("boxes"))
     n_gt = max(gt_masks.shape[0], gt_boxes.shape[0], gt_heat.shape[0])
     gt_col = _gt_colors(n_gt)
 
-    pred_logits = pred["pred_logits"]
-    pred_boxes_t = pred["pred_boxes"]
-    pred_boxes = pred_boxes_t.detach().float().cpu().numpy()
+    pred_logits, pred_boxes_t = pred["pred_logits"], pred["pred_boxes"]
+    pred_boxes = _as_boxes_np(pred_boxes_t)
     scores = _object_scores(pred_logits)
-    src_idx, tgt_idx = _match_queries_to_gt(pred_logits, pred_boxes_t, target)
+    pred_masks = _as_hw_masks(pred_masks_t.detach().float().cpu().sigmoid(), hs, ws)
+    pred_heats = _as_hw_masks(pred_kps_t.detach().float().cpu().sigmoid(), hs, ws)
 
-    # Pred-Det: matched boxes, GT colors, score filter
-    vis_boxes = np.zeros((0, 4), dtype=np.float32)
-    vis_col = np.zeros((0, 3), dtype=np.float32)
-    if src_idx.size:
-        keep = scores[src_idx] > score_threshold
-        src_keep = src_idx[keep]
-        tgt_keep = tgt_idx[keep]
-        if src_keep.size:
-            vis_boxes = pred_boxes[src_keep]
-            vis_col = gt_col[tgt_keep]
+    if match_to_gt:
+        src_idx, tgt_idx = _match_queries_to_gt(pred_logits, pred_boxes_t, target)
+        keep = scores[src_idx] > score_threshold if src_idx.size else np.zeros(0, dtype=bool)
+        q_idx, t_idx = src_idx[keep], tgt_idx[keep]
+        pred_col = gt_col[t_idx]
+        pred_masks_vis = _aligned_to_gt_slots(pred_masks, src_idx, tgt_idx, n_gt)
+        pred_heats_vis = _aligned_to_gt_slots(pred_heats, src_idx, tgt_idx, n_gt)
+        map_col = gt_col
+    else:
+        q_idx = np.flatnonzero(scores > score_threshold)
+        q_idx = q_idx[np.argsort(-scores[q_idx])]
+        pred_col = _gt_colors(len(q_idx))
+        pred_masks_vis, pred_heats_vis = pred_masks[q_idx], pred_heats[q_idx]
+        map_col = pred_col
 
-    pred_mask_np = torch.sigmoid(pred_masks_t.detach().float().cpu())
-    pred_kp_np = torch.sigmoid(pred_kps_t.detach().float().cpu())
-    pred_masks = _as_hw_masks(pred_mask_np, hs, ws)
-    pred_heats = _as_hw_masks(pred_kp_np, hs, ws)
-    pred_masks_inst = _aligned_to_gt_slots(pred_masks, src_idx, tgt_idx, n_gt)
-    pred_heats_inst = _aligned_to_gt_slots(pred_heats, src_idx, tgt_idx, n_gt)
+    panels = [
+        rgb,
+        _overlay_boxes(rgb, gt_boxes, gt_col),
+        _overlay_masks(rgb, gt_masks, gt_col, alpha=0.55),
+        _render_heatmaps(gt_heat, gt_col, hs, ws),
+        _overlay_boxes(rgb, pred_boxes[q_idx], pred_col),
+        _overlay_masks(rgb, pred_masks_vis, map_col, alpha=0.55),
+        _render_heatmaps(pred_heats_vis, map_col, hs, ws),
+    ]
+    return np.concatenate(
+        [_panel_with_title(p, name) for p, name in zip(panels, _PANEL_TITLES)],
+        axis=1,
+    )
 
-    gt_det = _overlay_boxes(rgb, gt_boxes, gt_col)
-    gt_seg = _overlay_masks(rgb, gt_masks, gt_col, alpha=0.55)
-    gt_kps_img = _render_heatmaps(gt_heat, gt_col, hs, ws)
 
-    pred_det = _overlay_boxes(rgb, vis_boxes, vis_col)
-    pred_seg = _overlay_masks(rgb, pred_masks_inst, gt_col, alpha=0.55)
-    pred_kps_img = _render_heatmaps(pred_heats_inst, gt_col, hs, ws)
+_JPEG_QUALITY = 92
 
-    panels = [rgb, gt_det, gt_seg, gt_kps_img, pred_det, pred_seg, pred_kps_img]
-    titled = [_panel_with_title(p, name) for p, name in zip(panels, _PANEL_TITLES)]
-    return np.concatenate(titled, axis=1)
+
+def _save_strip_jpeg(strip: np.ndarray, path: str) -> str:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    Image.fromarray(strip, mode="RGB").save(path, format="JPEG", quality=_JPEG_QUALITY)
+    return path
 
 
 def save_gt_pred_strip(
@@ -299,12 +306,51 @@ def save_gt_pred_strip(
     epoch: int,
     step: int,
 ) -> str:
-    """Write strip PNG to ``{output_dir}/vis/epoch####_step######.png``."""
+    """Write strip JPEG to ``{output_dir}/vis/epoch####_step######.jpg``."""
     vis_dir = os.path.join(output_dir, "vis")
-    os.makedirs(vis_dir, exist_ok=True)
-    path = os.path.join(vis_dir, f"epoch{epoch:04d}_step{step:06d}.png")
-    Image.fromarray(strip, mode="RGB").save(path)
-    return path
+    path = os.path.join(vis_dir, f"epoch{epoch:04d}_step{step:06d}.jpg")
+    return _save_strip_jpeg(strip, path)
+
+
+def save_val_gt_pred_strip(
+    strip: np.ndarray,
+    output_dir: str,
+    epoch: int,
+    sample_name: str,
+) -> str:
+    """Write val strip JPEG to ``{output_dir}/vis_val/epoch_{epoch:05d}/{sample_name}.jpg``."""
+    vis_dir = os.path.join(output_dir, "vis_val", f"epoch_{epoch:05d}")
+    safe = str(sample_name).replace("/", "_").replace("\\", "_").strip() or "sample"
+    if not safe.lower().endswith((".jpg", ".jpeg", ".png")):
+        safe = f"{safe}.jpg"
+    path = os.path.join(vis_dir, safe)
+    return _save_strip_jpeg(strip, path)
+
+
+def _strip_from_outputs(
+    image: torch.Tensor,
+    target: Dict[str, torch.Tensor],
+    outputs: Dict[str, torch.Tensor],
+    *,
+    stride: int,
+    score_threshold: float,
+    sample_index: int = 0,
+    match_to_gt: bool = True,
+) -> np.ndarray:
+    pred = {
+        "pred_logits": outputs["pred_logits"][sample_index],
+        "pred_boxes": outputs["pred_boxes"][sample_index],
+        "pred_masks": outputs["pred_masks"][sample_index],
+        "pred_kps": outputs["pred_kps"][sample_index],
+    }
+    return render_gt_pred_strip(
+        image,
+        target,
+        pred,
+        stride=stride,
+        score_threshold=score_threshold,
+        match_to_gt=match_to_gt,
+    )
 
 
 @torch.no_grad()
@@ -321,19 +367,55 @@ def log_train_visualization(
     score_threshold: float = 0.5,
 ) -> str:
     """Render and save one-sample GT/Pred strip from last-layer outputs."""
-    pred = {
-        "pred_logits": outputs["pred_logits"][0],
-        "pred_boxes": outputs["pred_boxes"][0],
-        "pred_masks": outputs["pred_masks"][0],
-        "pred_kps": outputs["pred_kps"][0],
-    }
-    strip = render_gt_pred_strip(
-        image, target, pred, stride=stride, score_threshold=score_threshold,
+    strip = _strip_from_outputs(
+        image,
+        target,
+        outputs,
+        stride=stride,
+        score_threshold=score_threshold,
+        match_to_gt=True,
     )
     path = save_gt_pred_strip(strip, output_dir, epoch, step)
     if wandb_run is not None:
         wandb_run.log(
             {"vis/gt_pred": wandb_run.Image(strip, caption=os.path.basename(path))},
             step=step,
+        )
+    return path
+
+
+@torch.no_grad()
+def log_val_visualization(
+    image: torch.Tensor,
+    target: Dict[str, torch.Tensor],
+    outputs: Dict[str, torch.Tensor],
+    *,
+    stride: int,
+    output_dir: str,
+    epoch: int,
+    sample_name: str,
+    sample_index: int = 0,
+    wandb_run: Optional[object] = None,
+    global_step: Optional[int] = None,
+    score_threshold: float = 0.5,
+) -> str:
+    """Render and save one val-sample strip; Pred filtered by score only (FP visible).
+
+    Writes to ``{output_dir}/vis_val/epoch_{epoch:05d}/{sample_name}.jpg``.
+    """
+    strip = _strip_from_outputs(
+        image,
+        target,
+        outputs,
+        stride=stride,
+        score_threshold=score_threshold,
+        sample_index=sample_index,
+        match_to_gt=False,
+    )
+    path = save_val_gt_pred_strip(strip, output_dir, epoch, sample_name)
+    if wandb_run is not None:
+        wandb_run.log(
+            {"vis/val_gt_pred": wandb_run.Image(strip, caption=os.path.basename(path))},
+            step=global_step if global_step is not None else epoch,
         )
     return path

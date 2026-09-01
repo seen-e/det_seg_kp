@@ -69,40 +69,15 @@ def init_wandb(cfg: Config, world_size: int, wandb_tags: Optional[list] = None) 
     import wandb
 
     run_name = cfg.train.wandb_run_name or None
+    wandb_config = asdict(cfg) if is_dataclass(cfg) else {}
+    wandb_config["world_size"] = world_size
+    wandb_config["global_batch_size"] = cfg.train.batch_size * world_size
     wandb.init(
         project=cfg.train.wandb_project,
         entity=cfg.train.wandb_entity or None,
         name=run_name,
         dir=cfg.train.output_dir,
         tags=wandb_tags,
-        config={
-            "epochs": cfg.train.epochs,
-            "batch_size_per_gpu": cfg.train.batch_size,
-            "world_size": world_size,
-            "global_batch_size": cfg.train.batch_size * world_size,
-            "lr": cfg.train.lr,  # already sqrt(global_batch/4)-scaled in train.py
-            "lr_backbone": cfg.train.lr_backbone,
-            "precision": cfg.train.precision,
-            "img_width": cfg.data.img_width,
-            "img_height": cfg.data.img_height,
-            "num_queries": cfg.model.object_query_decoder.num_queries,
-            "vision_tower": (
-                asdict(cfg.model.vision_tower)
-                if is_dataclass(cfg.model.vision_tower)
-                else cfg.model.vision_tower
-            ),
-            "pixel_decoder": (
-                asdict(cfg.model.pixel_decoder)
-                if is_dataclass(cfg.model.pixel_decoder)
-                else cfg.model.pixel_decoder
-            ),
-            "object_query_decoder": (
-                asdict(cfg.model.object_query_decoder)
-                if is_dataclass(cfg.model.object_query_decoder)
-                else cfg.model.object_query_decoder
-            ),
-            "use_ema": cfg.train.use_ema,
-            "ema_decay": cfg.train.ema_decay,
-        },
+        config=wandb_config,
     )
     return wandb

@@ -37,13 +37,13 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from timm.utils import ModelEmaV2
 
-from modules.config import Config, config_from_args, parse_train_args
+from modules.config import config_from_args, parse_train_args
 from datasets import build_dataloader
 from modules.loss import build_criterion
 from modules import DetSegKPModel
 from modules.utils import PrecisionSpec, resolve_precision, set_seed
 from modules.utils.checkpoint import save_checkpoint
-from modules.utils.visualize import log_train_visualization
+from modules.utils.visualize import log_train_visualization, log_val_visualization
 from modules.utils.distributed import (
     cleanup_distributed,
     init_wandb,
@@ -55,297 +55,354 @@ from modules.utils.distributed import (
 )
 
 
-def train_one_epoch(
-    model: DetSegKPModel,
-    criterion,
-    dataloader,
-    optimizer,
-    device: torch.device,
-    epoch: int,
-    rank: int,
-    world_size: int,
-    cfg: Config,
-    wandb_run: Optional[Any] = None,
-    global_step: int = 0,
-    ema: Optional[ModelEmaV2] = None,
-    precision: Optional[PrecisionSpec] = None,
-    scaler: Optional[GradScaler] = None,
-) -> tuple[Dict[str, float], int]:
-    """One training epoch with AMP, optional EMA, and periodic GT/Pred dumps."""
-    if precision is None:
-        precision = resolve_precision("fp32", device)
-    if scaler is None:
-        scaler = precision.build_scaler()
-    model.train()
-    loss_accum: Dict[str, float] = {}
-    num_steps = 0
+class Trainer:
+    """Owns training state so epoch / global_step / rank need not be threaded everywhere."""
 
-    for step, batch in enumerate(dataloader):
-        images = batch["images"].to(device, non_blocking=True)
-        targets = [{k: v.to(device, non_blocking=True) for k, v in t.items()} for t in batch["targets"]]
+    def __init__(self, args) -> None:
+        self.rank, self.world_size, self.local_rank, self.distributed = setup_distributed(
+            args.dist_backend
+        )
+        self.cfg = config_from_args(args)
+        self.wandb_tags = args.wandb_tags
 
-        with precision.autocast():
-            outputs = model(images)
-            loss, loss_dict = criterion(outputs, targets)
+        self.epoch = 0
+        self.global_step = 0
 
-        optimizer.zero_grad(set_to_none=True)
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.train.clip_max_norm)
-        scaler.step(optimizer)
-        scaler.update()
-        if ema is not None:
-            ema.update(unwrap_model(model))
+        self.device: torch.device
+        self.precision: PrecisionSpec
+        self.scaler: GradScaler
+        self.model: torch.nn.Module
+        self.criterion: torch.nn.Module
+        self.optimizer: AdamW
+        self.scheduler: SequentialLR
+        self.ema: Optional[ModelEmaV2] = None
+        self.train_loader = None
+        self.val_loader = None
+        self.wandb_run: Optional[Any] = None
 
-        num_steps += 1
-        global_step += 1
-        for k, v in loss_dict.items():
-            loss_accum[k] = loss_accum.get(k, 0.0) + v
+        self.total_batch_size = 0
+        self.lr_scale = 1.0
+        self.base_lr = 0.0
+        self.base_lr_backbone = 0.0
+        self.warmup_epochs = 0
+        self.cosine_epochs = 0
 
-        if cfg.train.vis_interval > 0 and global_step % cfg.train.vis_interval == 0 and is_main_process(rank):
-            vis_path = log_train_visualization(
-                images[0],
-                targets[0],
-                outputs,
-                stride=cfg.data.stride,
-                output_dir=cfg.train.output_dir,
-                epoch=epoch,
-                step=global_step,
-                wandb_run=wandb_run,
-            )
-            log_info(rank, f"  vis saved: {vis_path}")
+    @property
+    def is_main(self) -> bool:
+        return is_main_process(self.rank)
 
-        if (step + 1) % cfg.train.log_interval == 0:
-            log_info(
-                rank,
-                f"  Epoch [{epoch}] Step [{step+1}/{len(dataloader)}] "
-                + " ".join(f"{k}={v:.4f}" for k, v in loss_dict.items()),
-            )
-            if wandb_run is not None and is_main_process(rank):
-                wandb_run.log(
-                    {f"train/{k}": v for k, v in loss_dict.items()} | {"train/lr": optimizer.param_groups[0]["lr"]},
-                    step=global_step,
-                )
+    def log(self, msg: str) -> None:
+        log_info(self.rank, msg)
 
-    if num_steps == 0:
-        return {}, global_step
-    metrics = {k: v / num_steps for k, v in loss_accum.items()}
-    return reduce_dict(metrics, world_size, device), global_step
+    def setup(self) -> None:
+        set_seed(self.cfg.train.seed + self.rank)
 
+        self.total_batch_size = self.cfg.train.batch_size * self.world_size
+        self.lr_scale = math.sqrt(self.total_batch_size / float(LR_REF_BATCH_SIZE))
+        self.base_lr, self.base_lr_backbone = self.cfg.train.lr, self.cfg.train.lr_backbone
+        self.cfg.train.lr = self.base_lr * self.lr_scale
+        self.cfg.train.lr_backbone = self.base_lr_backbone * self.lr_scale
 
-@torch.no_grad()
-def evaluate(
-    model: DetSegKPModel,
-    criterion,
-    dataloader,
-    device: torch.device,
-    world_size: int,
-    precision: Optional[PrecisionSpec] = None,
-) -> Dict[str, float]:
-    """Validation-loop loss average (no grad); caller may swap in EMA weights."""
-    if precision is None:
-        precision = resolve_precision("fp32", device)
-    model.eval()
-    loss_accum: Dict[str, float] = {}
-    num_steps = 0
-
-    for batch in dataloader:
-        images = batch["images"].to(device, non_blocking=True)
-        targets = [{k: v.to(device, non_blocking=True) for k, v in t.items()} for t in batch["targets"]]
-        with precision.autocast():
-            outputs = model(images)
-            _, loss_dict = criterion(outputs, targets)
-        num_steps += 1
-        for k, v in loss_dict.items():
-            loss_accum[k] = loss_accum.get(k, 0.0) + v
-
-    if num_steps == 0:
-        return {}
-    metrics = {k: v / num_steps for k, v in loss_accum.items()}
-    return reduce_dict(metrics, world_size, device)
-
-
-def main() -> None:
-    args = parse_train_args()
-    rank, world_size, local_rank, distributed = setup_distributed(args.dist_backend)
-
-    try:
-        cfg = config_from_args(args)
-        set_seed(cfg.train.seed + rank)
-
-        total_batch_size = cfg.train.batch_size * world_size
-        lr_scale = math.sqrt(total_batch_size / float(LR_REF_BATCH_SIZE))
-        base_lr, base_lr_backbone = cfg.train.lr, cfg.train.lr_backbone
-        cfg.train.lr = base_lr * lr_scale
-        cfg.train.lr_backbone = base_lr_backbone * lr_scale
-
-        device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
-        if device.type == "cuda":
+        self.device = (
+            torch.device("cuda", self.local_rank) if torch.cuda.is_available() else torch.device("cpu")
+        )
+        if self.device.type == "cuda":
             torch.backends.cudnn.benchmark = True
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
-        precision = resolve_precision(cfg.train.precision, device)
-        scaler = precision.build_scaler()
+        self.precision = resolve_precision(self.cfg.train.precision, self.device)
+        self.scaler = self.precision.build_scaler()
 
-        if distributed:
-            payload = [cfg.train.output_dir]
+        if self.distributed:
+            payload = [self.cfg.train.output_dir]
             dist.broadcast_object_list(payload, src=0)
-            cfg.train.output_dir = payload[0]
-        if is_main_process(rank):
-            os.makedirs(cfg.train.output_dir, exist_ok=True)
-        if distributed:
+            self.cfg.train.output_dir = payload[0]
+        if self.is_main:
+            os.makedirs(self.cfg.train.output_dir, exist_ok=True)
+        if self.distributed:
             dist.barrier()
 
-        wandb_run = init_wandb(cfg, world_size, wandb_tags=args.wandb_tags) if is_main_process(rank) else None
-
-        log_info(rank, f"Distributed: {distributed} | world_size={world_size} | rank={rank} | local_rank={local_rank}")
-        log_info(rank, "Building dataloaders...")
-        train_loader = build_dataloader(cfg, "train", cfg.train.batch_size, distributed)
-        val_loader = build_dataloader(cfg, "val", cfg.train.batch_size, distributed)
-        log_info(
-            rank,
-            f"data_root={cfg.data.data_root} "
-            f"input={cfg.data.img_width}x{cfg.data.img_height} "
-            f"stride={cfg.data.stride} "
-            f"target={cfg.data.img_width // cfg.data.stride}x{cfg.data.img_height // cfg.data.stride} "
-            f"train={len(train_loader.dataset)} val={len(val_loader.dataset)}",
+        self.wandb_run = (
+            init_wandb(self.cfg, self.world_size, wandb_tags=self.wandb_tags)
+            if self.is_main
+            else None
         )
 
-        log_info(rank, "Building model...")
-        model = DetSegKPModel(cfg.model).to(device)
-        if distributed:
-            model = DDP(model, device_ids=[local_rank] if device.type == "cuda" else None)
+        self.log(
+            f"Distributed: {self.distributed} | world_size={self.world_size} "
+            f"| rank={self.rank} | local_rank={self.local_rank}"
+        )
+        self.log("Building dataloaders...")
+        self.train_loader = build_dataloader(
+            self.cfg, "train", self.cfg.train.batch_size, self.distributed
+        )
+        self.val_loader = build_dataloader(
+            self.cfg, "val", self.cfg.train.batch_size, self.distributed
+        )
+        self.log(
+            f"data_root={self.cfg.data.data_root} "
+            f"val_ratio={self.cfg.data.val_ratio} "
+            f"input={self.cfg.data.img_width}x{self.cfg.data.img_height} "
+            f"stride={self.cfg.data.stride} "
+            f"target={self.cfg.data.img_width // self.cfg.data.stride}"
+            f"x{self.cfg.data.img_height // self.cfg.data.stride} "
+            f"train={len(self.train_loader.dataset)} val={len(self.val_loader.dataset)}"
+        )
 
-        criterion = build_criterion(cfg).to(device)
-        raw_model = unwrap_model(model)
+        self.log("Building model...")
+        model = DetSegKPModel(self.cfg.model).to(self.device)
+        if self.distributed:
+            model = DDP(model, device_ids=[self.local_rank] if self.device.type == "cuda" else None)
+        self.model = model
+
+        self.criterion = build_criterion(self.cfg).to(self.device)
+        raw_model = unwrap_model(self.model)
         backbone_params, other_params = [], []
         for name, param in raw_model.named_parameters():
             if not param.requires_grad:
                 continue
             (backbone_params if name.startswith("vision_tower") else other_params).append(param)
-        optimizer = AdamW(
+        self.optimizer = AdamW(
             [
-                {"params": other_params, "lr": cfg.train.lr},
-                {"params": backbone_params, "lr": cfg.train.lr_backbone},
+                {"params": other_params, "lr": self.cfg.train.lr},
+                {"params": backbone_params, "lr": self.cfg.train.lr_backbone},
             ],
-            weight_decay=cfg.train.weight_decay,
+            weight_decay=self.cfg.train.weight_decay,
         )
-        warmup_epochs = int(round(cfg.train.epochs * cfg.train.warmup_epochs_ratio))
-        warmup_epochs = max(0, min(warmup_epochs, max(cfg.train.epochs - 1, 0)))
-        cosine_epochs = max(1, cfg.train.epochs - warmup_epochs)
-        scheduler = SequentialLR(
-            optimizer,
+        self.warmup_epochs = int(round(self.cfg.train.epochs * self.cfg.train.warmup_epochs_ratio))
+        self.warmup_epochs = max(0, min(self.warmup_epochs, max(self.cfg.train.epochs - 1, 0)))
+        self.cosine_epochs = max(1, self.cfg.train.epochs - self.warmup_epochs)
+        self.scheduler = SequentialLR(
+            self.optimizer,
             schedulers=[
                 LinearLR(
-                    optimizer,
-                    start_factor=1e-2 if warmup_epochs > 0 else 1.0,
+                    self.optimizer,
+                    start_factor=1e-2 if self.warmup_epochs > 0 else 1.0,
                     end_factor=1.0,
-                    total_iters=warmup_epochs,
+                    total_iters=self.warmup_epochs,
                 ),
                 CosineAnnealingLR(
-                    optimizer,
-                    T_max=cosine_epochs,
-                    eta_min=cfg.train.lr * cfg.train.lr_min_ratio,
+                    self.optimizer,
+                    T_max=self.cosine_epochs,
+                    eta_min=self.cfg.train.lr * self.cfg.train.lr_min_ratio,
                 ),
             ],
-            milestones=[warmup_epochs],
+            milestones=[self.warmup_epochs],
         )
-        ema = (
-            ModelEmaV2(raw_model, decay=cfg.train.ema_decay, device=device)
-            if cfg.train.use_ema
+        self.ema = (
+            ModelEmaV2(raw_model, decay=self.cfg.train.ema_decay, device=self.device)
+            if self.cfg.train.use_ema
             else None
         )
 
-        num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        log_info(rank, f"Model parameters: {num_params / 1e6:.2f}M")
-        log_info(rank, f"Global batch size: {total_batch_size}")
-        log_info(
-            rank,
-            f"LR scale=sqrt({total_batch_size}/{LR_REF_BATCH_SIZE})={lr_scale:g} "
-            f"(base_lr={base_lr:g} -> {cfg.train.lr:g}, "
-            f"base_backbone_lr={base_lr_backbone:g} -> {cfg.train.lr_backbone:g})",
+        num_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        self.log(f"Model parameters: {num_params / 1e6:.2f}M")
+        self.log(f"Global batch size: {self.total_batch_size}")
+        self.log(
+            f"LR scale=sqrt({self.total_batch_size}/{LR_REF_BATCH_SIZE})={self.lr_scale:g} "
+            f"(base_lr={self.base_lr:g} -> {self.cfg.train.lr:g}, "
+            f"base_backbone_lr={self.base_lr_backbone:g} -> {self.cfg.train.lr_backbone:g})"
         )
-        log_info(
-            rank,
-            f"LR={cfg.train.lr} backbone_lr={cfg.train.lr_backbone} "
-            f"{'warmup=' + str(warmup_epochs) + ' epochs then cosine' if warmup_epochs else 'cosine only'} "
-            f"(T_max={cosine_epochs}, eta_min={cfg.train.lr * cfg.train.lr_min_ratio:g})",
+        self.log(
+            f"LR={self.cfg.train.lr} backbone_lr={self.cfg.train.lr_backbone} "
+            f"{'warmup=' + str(self.warmup_epochs) + ' epochs then cosine' if self.warmup_epochs else 'cosine only'} "
+            f"(T_max={self.cosine_epochs}, eta_min={self.cfg.train.lr * self.cfg.train.lr_min_ratio:g})"
         )
-        log_info(rank, f"Precision: {precision.describe()}")
-        log_info(rank, f"Val every {cfg.train.val_interval} epochs" if cfg.train.val_interval > 0 else "Val disabled")
-        if ema is not None:
-            log_info(rank, f"EMA enabled (decay={cfg.train.ema_decay})")
+        self.log(f"Precision: {self.precision.describe()}")
+        self.log(
+            f"Val every {self.cfg.train.val_interval} epochs"
+            if self.cfg.train.val_interval > 0
+            else "Val disabled"
+        )
+        if self.ema is not None:
+            self.log(f"EMA enabled (decay={self.cfg.train.ema_decay})")
 
-        global_step = 0
-        for epoch in range(1, cfg.train.epochs + 1):
-            if distributed and hasattr(train_loader.sampler, "set_epoch"):
-                train_loader.sampler.set_epoch(epoch)
+    def train_one_epoch(self) -> Dict[str, float]:
+        """One training epoch with AMP, optional EMA, and periodic GT/Pred dumps."""
+        self.model.train()
+        loss_accum: Dict[str, float] = {}
+        num_steps = 0
+
+        for step, batch in enumerate(self.train_loader):
+            images = batch["images"].to(self.device, non_blocking=True)
+            targets = [
+                {k: v.to(self.device, non_blocking=True) for k, v in t.items()}
+                for t in batch["targets"]
+            ]
+
+            with self.precision.autocast():
+                outputs = self.model(images)
+                loss, loss_dict = self.criterion(outputs, targets)
+
+            self.optimizer.zero_grad(set_to_none=True)
+            self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(), max_norm=self.cfg.train.clip_max_norm
+            )
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            if self.ema is not None:
+                self.ema.update(unwrap_model(self.model))
+
+            num_steps += 1
+            self.global_step += 1
+            for k, v in loss_dict.items():
+                loss_accum[k] = loss_accum.get(k, 0.0) + v
+
+            if (
+                self.cfg.train.vis_interval > 0
+                and self.global_step % self.cfg.train.vis_interval == 0
+                and self.is_main
+            ):
+                vis_path = log_train_visualization(
+                    images[0],
+                    targets[0],
+                    outputs,
+                    stride=self.cfg.data.stride,
+                    output_dir=self.cfg.train.output_dir,
+                    epoch=self.epoch,
+                    step=self.global_step,
+                    wandb_run=self.wandb_run,
+                )
+                self.log(f"  vis saved: {vis_path}")
+
+            if (step + 1) % self.cfg.train.log_interval == 0:
+                self.log(
+                    f"  Epoch [{self.epoch}] Step [{step + 1}/{len(self.train_loader)}] "
+                    + " ".join(f"{k}={v:.4f}" for k, v in loss_dict.items())
+                )
+                if self.wandb_run is not None and self.is_main:
+                    self.wandb_run.log(
+                        {f"train/{k}": v for k, v in loss_dict.items()}
+                        | {"train/lr": self.optimizer.param_groups[0]["lr"]},
+                        step=self.global_step,
+                    )
+
+        if num_steps == 0:
+            return {}
+        metrics = {k: v / num_steps for k, v in loss_accum.items()}
+        return reduce_dict(metrics, self.world_size, self.device)
+
+    @torch.no_grad()
+    def evaluate(self) -> Dict[str, float]:
+        """Validation-loop loss average (no grad); may use EMA weights.
+
+        Dumps every sample in this rank's shard to
+        ``{output_dir}/vis_val/epoch_{epoch:05d}/``.
+        """
+        eval_model = self.ema.module if self.ema is not None else self.model
+        eval_model.eval()
+        loss_accum: Dict[str, float] = {}
+        num_steps = 0
+        vis_count = 0
+        vis_dir = os.path.join(
+            self.cfg.train.output_dir, "vis_val", f"epoch_{self.epoch:05d}"
+        )
+
+        for batch in self.val_loader:
+            images = batch["images"].to(self.device, non_blocking=True)
+            targets = [
+                {k: v.to(self.device, non_blocking=True) for k, v in t.items()}
+                for t in batch["targets"]
+            ]
+            with self.precision.autocast():
+                outputs = eval_model(images)
+                _, loss_dict = self.criterion(outputs, targets)
+            stems = batch.get("stems") or [""] * images.shape[0]
+            for i in range(images.shape[0]):
+                stem = stems[i] if i < len(stems) else ""
+                sample_name = stem or f"{vis_count:05d}"
+                do_wandb = self.wandb_run is not None and self.is_main and vis_count == 0
+                log_val_visualization(
+                    images[i],
+                    targets[i],
+                    outputs,
+                    stride=self.cfg.data.stride,
+                    output_dir=self.cfg.train.output_dir,
+                    epoch=self.epoch,
+                    sample_name=sample_name,
+                    sample_index=i,
+                    wandb_run=self.wandb_run if do_wandb else None,
+                    global_step=self.global_step,
+                )
+                vis_count += 1
+            num_steps += 1
+            for k, v in loss_dict.items():
+                loss_accum[k] = loss_accum.get(k, 0.0) + v
+
+        if self.is_main:
+            self.log(f"  val vis saved under: {vis_dir} ({vis_count} samples on rank0)")
+
+        if num_steps == 0:
+            return {}
+        metrics = {k: v / num_steps for k, v in loss_accum.items()}
+        return reduce_dict(metrics, self.world_size, self.device)
+
+    def run(self) -> None:
+        self.setup()
+        for self.epoch in range(1, self.cfg.train.epochs + 1):
+            if self.distributed and hasattr(self.train_loader.sampler, "set_epoch"):
+                self.train_loader.sampler.set_epoch(self.epoch)
 
             t0 = time.time()
-            log_info(rank, f"\n=== Epoch {epoch}/{cfg.train.epochs} ===")
+            self.log(f"\n=== Epoch {self.epoch}/{self.cfg.train.epochs} ===")
 
-            train_metrics, global_step = train_one_epoch(
-                model,
-                criterion,
-                train_loader,
-                optimizer,
-                device,
-                epoch,
-                rank,
-                world_size,
-                cfg,
-                wandb_run=wandb_run,
-                global_step=global_step,
-                ema=ema,
-                precision=precision,
-                scaler=scaler,
+            train_metrics = self.train_one_epoch()
+            do_val = self.epoch == self.cfg.train.epochs or (
+                self.cfg.train.val_interval > 0 and self.epoch % self.cfg.train.val_interval == 0
             )
-            do_val = (
-                epoch == cfg.train.epochs
-                or (cfg.train.val_interval > 0 and epoch % cfg.train.val_interval == 0)
-            )
-            val_metrics: Dict[str, float] = {}
-            if do_val:
-                eval_model = ema.module if ema is not None else model
-                val_metrics = evaluate(
-                    eval_model, criterion, val_loader, device, world_size, precision=precision
-                )
-            scheduler.step()
+            val_metrics: Dict[str, float] = self.evaluate() if do_val else {}
+            self.scheduler.step()
 
             elapsed = time.time() - t0
             val_msg = f"Val loss={val_metrics.get('loss_total', 0.0):.4f} | " if val_metrics else ""
-            log_info(
-                rank,
-                f"Train loss={train_metrics.get('loss_total', 0.0):.4f} | {val_msg}Time={elapsed:.1f}s",
+            self.log(
+                f"Train loss={train_metrics.get('loss_total', 0.0):.4f} | {val_msg}Time={elapsed:.1f}s"
             )
 
-            if wandb_run is not None and is_main_process(rank):
+            if self.wandb_run is not None and self.is_main:
                 payload = {
                     **{f"epoch/train_{k}": v for k, v in train_metrics.items()},
-                    "epoch/lr": optimizer.param_groups[0]["lr"],
-                    "epoch": epoch,
+                    "epoch/lr": self.optimizer.param_groups[0]["lr"],
+                    "epoch": self.epoch,
                     "epoch/time_sec": elapsed,
                 }
                 if val_metrics:
                     payload.update({f"epoch/val_{k}": v for k, v in val_metrics.items()})
-                wandb_run.log(payload, step=global_step)
+                self.wandb_run.log(payload, step=self.global_step)
 
-            if is_main_process(rank) and epoch % cfg.train.save_interval == 0:
-                ckpt_path = os.path.join(cfg.train.output_dir, f"checkpoint_epoch{epoch}.pth")
-                save_checkpoint(ckpt_path, epoch, model, optimizer, cfg, ema=ema)
-                log_info(rank, f"Saved checkpoint: {ckpt_path}")
-                if wandb_run is not None and cfg.train.wandb_save_checkpoint:
-                    wandb_run.save(ckpt_path, base_path=cfg.train.output_dir, policy="now")
+            if self.is_main and self.epoch % self.cfg.train.save_interval == 0:
+                ckpt_path = os.path.join(
+                    self.cfg.train.output_dir, f"checkpoint_epoch{self.epoch}.pth"
+                )
+                save_checkpoint(
+                    ckpt_path, self.epoch, self.model, self.optimizer, self.cfg, ema=self.ema
+                )
+                self.log(f"Saved checkpoint: {ckpt_path}")
+                if self.wandb_run is not None and self.cfg.train.wandb_save_checkpoint:
+                    self.wandb_run.save(
+                        ckpt_path, base_path=self.cfg.train.output_dir, policy="now"
+                    )
 
-        if is_main_process(rank):
-            final_path = os.path.join(cfg.train.output_dir, "checkpoint_final.pth")
-            save_checkpoint(final_path, cfg.train.epochs, model, optimizer, cfg, ema=ema)
-            log_info(rank, f"\nTraining complete. Final checkpoint: {final_path}")
-            if wandb_run is not None:
-                if cfg.train.wandb_save_checkpoint:
-                    wandb_run.save(final_path, base_path=cfg.train.output_dir, policy="now")
-                wandb_run.finish()
+        if self.is_main:
+            final_path = os.path.join(self.cfg.train.output_dir, "checkpoint_final.pth")
+            save_checkpoint(
+                final_path, self.cfg.train.epochs, self.model, self.optimizer, self.cfg, ema=self.ema
+            )
+            self.log(f"\nTraining complete. Final checkpoint: {final_path}")
+            if self.wandb_run is not None:
+                if self.cfg.train.wandb_save_checkpoint:
+                    self.wandb_run.save(
+                        final_path, base_path=self.cfg.train.output_dir, policy="now"
+                    )
+                self.wandb_run.finish()
 
+
+def main() -> None:
+    args = parse_train_args()
+    try:
+        Trainer(args).run()
     finally:
         cleanup_distributed()
 

@@ -106,13 +106,14 @@ bash scripts/do_train.sh
 | `NPROC_PER_NODE` | 自动检测 | 每节点 GPU 数 |
 | `DATA_ROOT` | `./data` | 数据根目录 |
 | `OUTPUT_DIR` | `./work_dirs` | checkpoint / vis |
+| `KP_SIGMA` | `2.0` | keypoint heatmap Gaussian σ（heatmap 像素） |
 | `EPOCHS` | `50000` | epoch 数 |
 | `BATCH_SIZE` | `4` | **单卡** batch |
 | `LR` | `1e-4` | 主学习率；backbone 默认 `0.1×` |
 | `WARMUP_RATIO` | `0` | cosine 前 warmup 比例；`0` 关闭 |
 | `PRECISION` | `bf16` | `fp32` / `fp16` / `bf16` / `amp` |
 | `WANDB` | `1` | 设为 `0` 关闭 |
-| `WANDB_SAVE_CKPT` | `1` | 设为 `0` 不上传 checkpoint 到 wandb |
+| `WANDB_SAVE_CKPT` | `0` | 设为 `1` 才上传 checkpoint 到 wandb |
 
 ```bash
 bash scripts/do_train.sh --epochs 1000 --batch-size 2 --lr 5e-5
@@ -126,7 +127,7 @@ WANDB=0 DATA_ROOT=./data OUTPUT_DIR=./work_dirs bash scripts/do_train.sh
 - Cosine；`WARMUP_RATIO>0` 时先线性 warmup
 - Grad clip `0.1`；EMA 默认开（`decay=0.9999`）
 - 控制台 / wandb：主层分项 + `loss_aux` + `loss_total`
-- GT/Pred 拼图写到 `{OUTPUT_DIR}/<run>/vis/`
+- GT/Pred 拼图写到 `{OUTPUT_DIR}/<run>/vis/`（训练，JPG）与 `{OUTPUT_DIR}/<run>/vis_val/`（验证，每 epoch）
 
 ### 5.4 直接调 train.py
 
