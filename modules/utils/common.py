@@ -37,6 +37,7 @@ def gaussian_heatmap(
     center: Tuple[float, float],
     size: Tuple[int, int],
     sigma: float = 2.0,
+    threshold: float | None = 0.01,
 ) -> np.ndarray:
     """Generate a 2D Gaussian heatmap centered at (x, y)."""
     h, w = size
@@ -44,4 +45,6 @@ def gaussian_heatmap(
     xs = np.arange(0, w, dtype=np.float32)
     ys = np.arange(0, h, dtype=np.float32)[:, None]
     heatmap = np.exp(-((xs - x) ** 2 + (ys - y) ** 2) / (2 * sigma ** 2))
+    if threshold is not None:
+        heatmap[heatmap < threshold] = 0
     return heatmap

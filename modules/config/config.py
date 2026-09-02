@@ -95,6 +95,7 @@ class DataConfig:
 
     ``kp_sigma`` is the Gaussian width in *heatmap* pixels, not input-image
     pixels (e.g. 2.0 at stride=4 is 8 pixels on the input image).
+    ``kp_threshold`` zeros heatmap bins below this value (None disables).
 
     Instance filters (applied after geometric transforms; 0 disables each)::
 
@@ -112,6 +113,7 @@ class DataConfig:
     prefetch_factor: int = 2
     num_kps: int = 8
     kp_sigma: float = 2.0
+    kp_threshold: float | None = 0.01
     val_ratio: float = 0.2
     split_seed: int = 42
 

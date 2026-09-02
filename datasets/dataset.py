@@ -71,6 +71,7 @@ def kps_to_heatmap(
     height: int,
     width: int,
     sigma: float = 2.0,
+    threshold: Optional[float] = 0.01,
     heatmap: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
@@ -90,7 +91,7 @@ def kps_to_heatmap(
         if not kp_corner_valid(kp):
             continue
         x, y = kp_xy(kp)
-        blob = gaussian_heatmap((x, y), (height, width), sigma=sigma)
+        blob = gaussian_heatmap((x, y), (height, width), sigma=sigma, threshold=threshold)
         np.maximum(heatmap, blob, out=heatmap)
     return heatmap
 
@@ -100,12 +101,15 @@ def kps_to_heatmaps(
     height: int,
     width: int,
     sigma: float = 2.0,
+    threshold: Optional[float] = 0.01,
 ) -> np.ndarray:
     """(k, 8, 3) -> (k, H, W); one fused heatmap per instance."""
     kps = np.asarray(kps, dtype=np.float32)
     out = np.zeros((kps.shape[0], height, width), dtype=np.float32)
     for i in range(kps.shape[0]):
-        kps_to_heatmap(kps[i], height, width, sigma=sigma, heatmap=out[i])
+        kps_to_heatmap(
+            kps[i], height, width, sigma=sigma, threshold=threshold, heatmap=out[i]
+        )
     return out
 
 
@@ -258,6 +262,7 @@ class DetSegKPDataset(Dataset):
         self.stride = int(self.cfg.stride)
         self.num_kps = int(self.cfg.num_kps)
         self.kp_sigma = float(self.cfg.kp_sigma)
+        self.kp_threshold = self.cfg.kp_threshold
         if self.img_w % self.stride != 0 or self.img_h % self.stride != 0:
             raise ValueError(
                 f"img_width={self.img_w}, img_height={self.img_h} must be "
@@ -355,7 +360,9 @@ class DetSegKPDataset(Dataset):
         kps_hm = kps.copy()
         kps_hm[..., 0] /= float(self.stride)
         kps_hm[..., 1] /= float(self.stride)
-        kp_maps = kps_to_heatmaps(kps_hm, hs, ws, sigma=self.kp_sigma)
+        kp_maps = kps_to_heatmaps(
+            kps_hm, hs, ws, sigma=self.kp_sigma, threshold=self.kp_threshold
+        )
 
         image_t = rearrange(torch.from_numpy(rgb.copy()), "h w c -> c h w")
         return {

@@ -10,7 +10,7 @@
 # Environment overrides (optional) — all defaults live in TRAIN_ARGS below:
 #   NPROC_PER_NODE, EPOCHS, BATCH_SIZE, LR, WARMUP_RATIO, PRECISION,
 #   DATA_ROOT, OUTPUT_DIR, SEED, DIST_BACKEND, EMA_DECAY, VAL_RATIO,
-#   IMG_WIDTH, IMG_HEIGHT, STRIDE, KP_SIGMA, NUM_WORKERS, PREFETCH_FACTOR,
+#   IMG_WIDTH, IMG_HEIGHT, STRIDE, KP_SIGMA, KP_THRESHOLD, NUM_WORKERS, PREFETCH_FACTOR,
 #   NUM_QUERIES, LOG_INTERVAL, VIS_INTERVAL, VAL_INTERVAL, SAVE_INTERVAL,
 #   WANDB=0, WANDB_PROJECT, WANDB_RUN_NAME, WANDB_ENTITY, WANDB_SAVE_CKPT=1
 #
@@ -45,7 +45,8 @@ TRAIN_ARGS=(
   --opt "data.img_width=${IMG_WIDTH:-960}"
   --opt "data.img_height=${IMG_HEIGHT:-768}"
   --opt "data.stride=${STRIDE:-4}"
-  --opt "data.kp_sigma=${KP_SIGMA:-1.0}"
+  --opt "data.kp_sigma=${KP_SIGMA:-1.2}"
+  --opt "data.kp_threshold=${KP_THRESHOLD:-0.01}"
   --opt "data.val_ratio=${VAL_RATIO:-0.01}"
   --opt "data.num_workers=${NUM_WORKERS:-8}"
   --opt "data.prefetch_factor=${PREFETCH_FACTOR:-2}"
@@ -73,6 +74,7 @@ echo "Data root: ${DATA_ROOT:-/mnt/data/Det_Seg_KP}"
 echo "Output dir: ${OUTPUT_DIR:-./work_dirs}"
 echo "EMA decay: ${EMA_DECAY:-0.999}"
 echo "Val ratio: ${VAL_RATIO:-0.01}"
+echo "KP sigma: ${KP_SIGMA:-1.2}  threshold: ${KP_THRESHOLD:-0.01}"
 echo "wandb: ${WANDB:-1}"
 echo "wandb save ckpt: ${WANDB_SAVE_CKPT:-0}"
 

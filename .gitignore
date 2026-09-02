@@ -11,8 +11,10 @@ outputs/
 # training data
 data/
 
-# deploy code 
-deploy
+# deploy build products (keep source tracked)
+deploy/artifacts/
+deploy/cpp/build/
+deploy/**/__pycache__/
 
 # python cache
 **/__pycache__/
